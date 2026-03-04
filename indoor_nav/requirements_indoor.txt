@@ -1,0 +1,45 @@
+# Indoor Navigation — SOTA 2025 Dependencies
+# (on top of the base requirements.txt)
+
+# --- Deep Learning Core ---
+torch>=2.2.0
+torchvision>=0.17.0
+transformers>=4.44.0          # DINOv2, SigLIP2, Depth Anything V2, OpenVLA
+
+# --- Base SDK deps (already in requirements.txt) ---
+# fastapi, hypercorn, pydantic, playwright, python-dotenv
+# requests, aiohttp, opencv-python-headless, numpy, pynput, h5py, matplotlib
+
+# --- VLM Inference (pick your backend) ---
+# For Qwen2.5-VL via vLLM (RECOMMENDED):
+#   pip install vllm>=0.6.0
+#   vllm serve Qwen/Qwen2.5-VL-7B-Instruct --max-model-len 4096
+# For OpenAI API (GPT-4o):
+#   pip install openai
+# For local Ollama (legacy LLaVA):
+#   curl -fsSL https://ollama.com/install.sh | sh && ollama pull llava:13b
+
+# --- Goal Matching SOTA ---
+# DINOv2-VLAD (AnyLoc + Registers): via transformers (facebook/dinov2-with-registers-base)
+#   Register tokens eliminate patch-token artifacts → cleaner VLAD descriptors
+# SigLIP2:                         via transformers (google/siglip2-base-patch16-224)
+# EigenPlaces (optional):          requires torch.hub access
+
+# --- Depth Estimation ---
+# Depth Anything V2:  included via transformers (depth-anything/Depth-Anything-V2-Base-hf)
+# Depth Pro (optional):  pip install depth-pro  (Apple's metric depth model)
+
+# --- VLA Models (optional) ---
+# OpenVLA: pip install transformers>=4.44  (openvla/openvla-7b)
+# Octo:    pip install octo-model  (Berkeley's lightweight policy)
+
+# --- Optional: NoMaD / ViNT ---
+# diffusers>=0.28.0            # for NoMaD diffusion policy
+# einops                       # used by ViNT/NoMaD models
+
+# --- Optional: SuperGlue matching ---
+# kornia                       # for SuperGlue/LoFTR keypoint matching
+
+# --- Utilities ---
+Pillow>=10.0.0
+scipy>=1.11.0

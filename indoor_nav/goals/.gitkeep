@@ -1,0 +1,6 @@
+# Place goal images in this directory, named in checkpoint order:
+#   01_hallway.jpg
+#   02_door.jpg
+#   03_room.jpg
+#   ...
+# The agent will navigate to them sequentially.
