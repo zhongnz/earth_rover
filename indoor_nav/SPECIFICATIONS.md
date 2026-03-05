@@ -416,7 +416,7 @@ After exhausting all levels, the cycle restarts.
 
 2. **DINOv2 with Registers** — Darcet, T., Oquab, M., Mairal, J., Bojanowski, P. "Vision Transformers Need Registers." *ICLR 2024*, *arXiv:2309.16588*.
    - *Eliminates high-norm artifact tokens in ViTs by adding register tokens. Produces smoother, cleaner patch features — critical for our VLAD aggregation.*
-   - **Note: There is NO "DINOv3." DINOv2 with registers is the latest and best variant.**
+   - **Update:** DINOv3 was released in August 2025; this repo now includes a `dinov3_vlad` toggle for A/B evaluation against this DINOv2 baseline.
 
 3. **AnyLoc** — Keetha, N., Mishra, A., et al. "AnyLoc: Towards Universal Visual Place Recognition." *IEEE RA-L 2023*, *arXiv:2308.00688*. Presented at ICRA 2024.
    - *Demonstrates that DINOv2 patch tokens + VLAD aggregation achieves SOTA VPR across indoor, outdoor, aerial, underwater, and subterranean environments — up to 4x better than prior methods.*
@@ -520,6 +520,8 @@ python indoor_nav/run_indoor.py \
 |----------|---------|
 | **Full SOTA** (Qwen2.5-VL + DINOv2-VLAD) | `python indoor_nav/run_indoor.py --goals goals/ --policy vlm_hybrid --vlm-endpoint http://localhost:8000/v1` |
 | **No GPU** (heuristic only) | `python indoor_nav/run_indoor.py --goals goals/ --policy heuristic --obstacle-method simple_edge --device cpu` |
+| **DINOv3 toggle** | `python indoor_nav/run_indoor.py --goals goals/ --policy vlm_hybrid --match-method dinov3_vlad` |
+| **A/B matcher eval** | `python indoor_nav/eval_match_ab.py --goals-dir goals/ --queries-dir eval_queries/ --methods dinov2_vlad,dinov3_vlad` |
 | **GPT-4o** (cloud VLM) | `python indoor_nav/run_indoor.py --goals goals/ --policy vlm_hybrid --vlm-endpoint https://api.openai.com/v1 --vlm-model gpt-4o --vlm-api-key sk-...` |
 | **NoMaD** (diffusion policy) | `python indoor_nav/run_indoor.py --goals goals/ --policy nomad --match-method dinov2` |
 | **VLA** (OpenVLA) | `python indoor_nav/run_indoor.py --goals goals/ --policy vla` |
@@ -569,7 +571,7 @@ indoor_nav/
 ├── modules/
 │   ├── __init__.py
 │   ├── sdk_client.py           ← Async HTTP client for Earth Rovers SDK
-│   ├── checkpoint_manager.py   ← Goal matching (DINOv2-VLAD, SigLIP2, etc.)
+│   ├── checkpoint_manager.py   ← Goal matching (DINOv2-VLAD, DINOv3-VLAD, SigLIP2, etc.)
 │   ├── obstacle_avoidance.py   ← Monocular depth obstacle detection
 │   ├── topological_memory.py   ← Visual graph for backtracking & planning
 │   └── recovery.py             ← Stuck detection & recovery maneuvers
@@ -580,28 +582,30 @@ indoor_nav/
 │   ├── vla_policy.py           ← Vision-Language-Action model integration
 │   └── nomad_policy.py         ← NoMaD diffusion policy
 ├── goals/                      ← Goal images (per mission)
+├── eval_queries/               ← Optional query set for matcher A/B benchmarks
 ├── logs/                       ← HDF5 telemetry logs
 ├── run_indoor.py               ← CLI entry point
+├── eval_match_ab.py            ← A/B matcher benchmark
 ├── test_integration.py         ← Integration test suite
 └── requirements_indoor.txt     ← Python dependencies
 ```
 
 ---
 
-## Appendix A: Why There Is No "DINOv3"
+## Appendix A: DINOv3 Update and Migration Notes
 
-As of February 2025, **DINOv3 does not exist**. The DINO family from Meta/FAIR consists of:
+As of August 2025, **DINOv3 exists** and is publicly available (with accepted-access model weights and a dedicated DINOv3 license). This repository now supports:
 
-1. **DINO** (Caron et al., 2021) — Self-supervised ViT training via self-distillation.
-2. **DINOv2** (Oquab et al., Apr 2023) — Scaled-up self-supervised ViT with curated data pipeline, 1B parameter model distilled to smaller variants.
-3. **DINOv2 with Registers** (Darcet et al., Sep 2023, ICLR 2024) — Adds register tokens to fix high-norm artifact patches. This is the latest improvement to DINOv2 and the variant we use.
+1. `dinov2_vlad` (default baseline)
+2. `dinov3_vlad` (new toggle)
 
-Our system uses `facebook/dinov2-with-registers-base` (ViT-B/14 with 4 register tokens), which is the most advanced publicly available DINOv2 model. The register tokens improve:
-- **Patch token quality:** Smoother feature maps without artifacts
-- **Dense prediction:** Better for tasks that use individual patch tokens (our VLAD)
-- **Attention maps:** Cleaner attention patterns for downstream processing
+We keep `dinov2_vlad` as default for stability and reproducibility because existing indoor thresholds and recovery behavior were tuned on DINOv2-registers features.
 
-No successor model (DINOv3 or equivalent) has been announced or released as of this writing. DINOv2-reg4 remains SOTA for self-supervised visual features.
+Migration notes for `dinov3_vlad`:
+
+- Re-tune `match_threshold` and `match_patience` before competition runs.
+- Re-benchmark runtime on your deployment hardware (model size and latency differ).
+- Use the provided A/B script (`indoor_nav/eval_match_ab.py`) before switching defaults.
 
 ---
 

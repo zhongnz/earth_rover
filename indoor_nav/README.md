@@ -12,7 +12,7 @@ using only onboard cameras and IMU.
 
 | Component | Technology | Paper |
 |-----------|-----------|-------|
-| Goal Matching | DINOv2-VLAD (with registers) | AnyLoc (RA-L 2023, arXiv:2308.00688) + Registers (ICLR 2024, arXiv:2309.16588) |
+| Goal Matching | DINOv2-VLAD (default) / DINOv3-VLAD (toggle) | AnyLoc (RA-L 2023, arXiv:2308.00688) + Registers (ICLR 2024, arXiv:2309.16588) + DINOv3 (arXiv:2508.10104) |
 | VLM Reasoning | Qwen2.5-VL 7B | arXiv:2502.13923 |
 | Depth Estimation | Depth Anything V2 Base | NeurIPS 2024, arXiv:2406.09414 |
 | Topological Memory | Visual graph + A* | Inspired by NTS (NeurIPS 2020), Mobility VLA (arXiv:2407.07775) |
@@ -33,6 +33,16 @@ hypercorn main:app --reload
 python indoor_nav/run_indoor.py --goals indoor_nav/goals/ \
     --policy vlm_hybrid --vlm-endpoint http://localhost:8000/v1
 
+# Run (DINOv3-VLAD toggle)
+python indoor_nav/run_indoor.py --goals indoor_nav/goals/ \
+    --policy vlm_hybrid --match-method dinov3_vlad
+
+# A/B compare DINO backends
+python indoor_nav/eval_match_ab.py \
+    --goals-dir indoor_nav/goals \
+    --queries-dir indoor_nav/eval_queries \
+    --methods dinov2_vlad,dinov3_vlad
+
 # Run (no GPU, heuristic mode)
 python indoor_nav/run_indoor.py --goals indoor_nav/goals/ \
     --policy heuristic --obstacle-method simple_edge --device cpu
@@ -46,7 +56,7 @@ python indoor_nav/test_integration.py --skip-sdk
 ```
 Agent Orchestrator (10 Hz)
 ├── SDK Client → Camera frames + Telemetry + Control
-├── Goal Matcher (DINOv2-VLAD) → Checkpoint arrival detection
+├── Goal Matcher (DINOv2-VLAD / DINOv3-VLAD) → Checkpoint arrival detection
 ├── Navigation Policy (VLM-Hybrid) → Action commands
 ├── Obstacle Avoidance (Depth Anything V2) → Speed/steer modulation
 ├── Topological Memory (Visual Graph) → Backtracking & planning
@@ -66,7 +76,7 @@ indoor_nav/
 ├── configs/config.py           # Configuration dataclasses
 ├── modules/
 │   ├── sdk_client.py           # Async HTTP client for Earth Rovers SDK
-│   ├── checkpoint_manager.py   # Goal matching (6 backends)
+│   ├── checkpoint_manager.py   # Goal matching (7 backends incl. DINOv3-VLAD)
 │   ├── obstacle_avoidance.py   # Monocular depth obstacle detection
 │   ├── topological_memory.py   # Visual graph for backtracking
 │   └── recovery.py             # Stuck detection & recovery
@@ -77,6 +87,8 @@ indoor_nav/
 │   └── nomad_policy.py         # NoMaD diffusion policy
 ├── agent.py                    # Main orchestrator
 ├── run_indoor.py               # CLI entry point
+├── eval_match_ab.py            # A/B matcher benchmark script
+├── eval_queries/               # Optional query set for A/B matching
 ├── test_integration.py         # Integration tests
 ├── requirements_indoor.txt     # Dependencies
 ├── SPECIFICATIONS.md           # Full technical specs
@@ -85,7 +97,8 @@ indoor_nav/
 
 ## DINOv3?
 
-**DINOv3 does not exist** as of February 2025. DINOv2 (Meta/FAIR, 2023) is the
-latest in the DINO family. We use the improved **DINOv2 with Registers** variant
-(Darcet et al., ICLR 2024) which provides smoother patch features for our VLAD
-aggregation. See [SPECIFICATIONS.md](SPECIFICATIONS.md#appendix-a-why-there-is-no-dinov3) for details.
+As of August 2025, **DINOv3 exists** and is available in this repo via:
+
+- `--match-method dinov3_vlad`
+
+Default remains `dinov2_vlad` for stability and compatibility.

@@ -7,6 +7,7 @@ the current observation and the goal, and decides when a checkpoint is reached.
 Supports multiple SOTA feature backends (2025):
   - DINOv2-VLAD  (AnyLoc-style: DINOv2-reg4 patch tokens + VLAD aggregation —
                    SOTA VPR, arXiv:2308.00688 + arXiv:2309.16588)
+  - DINOv3-VLAD  (DINOv3 patch tokens + VLAD aggregation, arXiv:2508.10104)
   - SigLIP2      (Google 2025, best open vision encoder, arXiv:2502.14786)
   - DINOv2       (strong spatial features via CLS token, arXiv:2304.07193)
   - CLIP         (semantic matching baseline, Radford et al. 2021)
@@ -67,6 +68,8 @@ class GoalMatcher:
     SOTA backends (2025):
       - dinov2_vlad: AnyLoc-style multi-scale DINOv2 patch tokens + VLAD aggregation.
         Purpose-built for visual place recognition. Best for indoor navigation.
+      - dinov3_vlad: DINOv3 patch tokens + VLAD aggregation.
+        Stronger dense features, useful for A/B against DINOv2-VLAD.
       - siglip2: Google's SigLIP2 (2025) — superior to CLIP with sigmoid loss.
         Excellent semantic understanding for goal matching.
       - dinov2: DINOv2 CLS token baseline (strong but not VPR-specific).
@@ -95,6 +98,8 @@ class GoalMatcher:
 
         if self.cfg.match_method == "dinov2_vlad":
             self._load_dinov2_vlad()
+        elif self.cfg.match_method == "dinov3_vlad":
+            self._load_dinov3_vlad()
 
         elif self.cfg.match_method == "siglip2":
             self._load_siglip2()
@@ -126,32 +131,22 @@ class GoalMatcher:
         else:
             raise ValueError(f"Unknown match_method: {self.cfg.match_method}")
 
-    def _load_dinov2_vlad(self):
+    def _load_dino_vlad(self, model_name: str, label: str):
         """
-        AnyLoc-style DINOv2 + VLAD aggregation for visual place recognition.
+        AnyLoc-style DINO patch-token + VLAD aggregation for VPR.
 
-        Uses DINOv2 patch tokens (not just CLS) and aggregates them via VLAD
+        Uses patch tokens (not just CLS) and aggregates them via VLAD
         (Vector of Locally Aggregated Descriptors) for robust place matching.
-        This is the SOTA approach for VPR as of 2024-2025.
-
-        Prefers DINOv2-with-registers (Darcet et al., 2024) which produces
-        smoother, artifact-free patch features — critical for VLAD quality.
-        The register tokens absorb high-norm artifacts that otherwise
-        contaminate background patch tokens.
+        This is the SOTA approach for VPR as of 2024-2026.
 
         References:
-          - DINOv2: Oquab et al., "DINOv2: Learning Robust Visual Features
-            without Supervision", arXiv:2304.07193 (2023)
-          - Registers: Darcet et al., "Vision Transformers Need Registers",
-            arXiv:2309.16588 (2024, ICLR 2024)
           - AnyLoc: Keetha et al., "AnyLoc: Towards Universal Visual Place
             Recognition", IEEE RA-L 2023, arXiv:2308.00688
         """
         from transformers import AutoImageProcessor, AutoModel
         import torch
 
-        model_name = self.cfg.feature_model or "facebook/dinov2-with-registers-base"
-        logger.info("Loading DINOv2-VLAD (AnyLoc-style): %s on %s", model_name, self._device)
+        logger.info("Loading %s (AnyLoc-style): %s on %s", label, model_name, self._device)
         self._processor = AutoImageProcessor.from_pretrained(model_name)
         self._model = AutoModel.from_pretrained(model_name).to(self._device)
         self._model.eval()
@@ -165,7 +160,23 @@ class GoalMatcher:
         self._vlad_initialized = False
         self._patch_cache: List[np.ndarray] = []
 
-        logger.info("DINOv2-VLAD ready (hidden=%d, clusters=%d)", hidden_dim, n_clusters)
+        logger.info("%s ready (hidden=%d, clusters=%d)", label, hidden_dim, n_clusters)
+
+    def _load_dinov2_vlad(self):
+        """
+        DINOv2-with-registers + VLAD (current baseline).
+        """
+        model_name = self.cfg.feature_model or "facebook/dinov2-with-registers-base"
+        self._load_dino_vlad(model_name=model_name, label="DINOv2-VLAD")
+
+    def _load_dinov3_vlad(self):
+        """
+        DINOv3 + VLAD.
+
+        Default model is ViT-B/16 pre-trained on LVD-1689M.
+        """
+        model_name = self.cfg.feature_model or "facebook/dinov3-vitb16-pretrain-lvd1689m"
+        self._load_dino_vlad(model_name=model_name, label="DINOv3-VLAD")
 
     def _load_siglip2(self):
         """
@@ -251,7 +262,7 @@ class GoalMatcher:
         import torch
         from PIL import Image
 
-        if self.cfg.match_method == "dinov2_vlad":
+        if self.cfg.match_method in ("dinov2_vlad", "dinov3_vlad"):
             rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
             pil_img = Image.fromarray(rgb)
             inputs = self._processor(images=pil_img, return_tensors="pt").to(self._device)
@@ -363,13 +374,13 @@ class GoalMatcher:
         """
         Compute similarity score ∈ [0, 1] between current observation and goal.
 
-        For learned features (DINOv2-VLAD/SigLIP2/DINOv2/CLIP/EigenPlaces):
+        For learned features (DINOv2-VLAD/DINOv3-VLAD/SigLIP2/DINOv2/CLIP/EigenPlaces):
           cosine similarity mapped to [0, 1].
         For SIFT: normalized inlier count.
         """
         self._ensure_model()
 
-        learned_methods = ("dinov2_vlad", "siglip2", "dinov2", "clip", "eigenplaces")
+        learned_methods = ("dinov2_vlad", "dinov3_vlad", "siglip2", "dinov2", "clip", "eigenplaces")
 
         if self.cfg.match_method in learned_methods:
             obs_feat = self.extract_feature(obs_image)

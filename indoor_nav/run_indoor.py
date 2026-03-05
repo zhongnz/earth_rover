@@ -8,6 +8,10 @@ Usage:
       --policy vlm_hybrid --vlm-endpoint http://localhost:8000/v1 \\
       --vlm-model Qwen/Qwen2.5-VL-7B-Instruct --match-method dinov2_vlad
 
+  # DINOv3-VLAD evaluation mode:
+  python indoor_nav/run_indoor.py --goals indoor_nav/goals/ \\
+      --policy vlm_hybrid --match-method dinov3_vlad
+
   # With explicit goal image files:
   python indoor_nav/run_indoor.py --goals goal1.jpg goal2.jpg goal3.jpg
 
@@ -87,10 +91,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--vlm-model", default="Qwen/Qwen2.5-VL-7B-Instruct", help="VLM model name")
     p.add_argument("--vlm-api-key", default="", help="API key for VLM endpoint")
 
-    # Goal matching (SOTA: DINOv2-VLAD)
+    # Goal matching (SOTA: DINOv2-VLAD / DINOv3-VLAD)
     p.add_argument(
         "--match-method",
-        choices=["dinov2_vlad", "siglip2", "dinov2", "eigenplaces", "clip", "sift"],
+        choices=["dinov2_vlad", "dinov3_vlad", "siglip2", "dinov2", "eigenplaces", "clip", "sift"],
         default="dinov2_vlad",
         help="Image goal matching method (default: dinov2_vlad)",
     )
@@ -156,6 +160,9 @@ def build_config(args: argparse.Namespace) -> IndoorNavConfig:
     elif args.match_method == "dinov2_vlad":
         # Use registers variant for cleaner patch features (Darcet et al., 2024)
         cfg.goal.feature_model = "facebook/dinov2-with-registers-base"
+    elif args.match_method == "dinov3_vlad":
+        # DINOv3 ViT-B/16 with LVD-1689M pretrain (released Aug 2025).
+        cfg.goal.feature_model = "facebook/dinov3-vitb16-pretrain-lvd1689m"
     elif args.match_method == "dinov2":
         cfg.goal.feature_model = "facebook/dinov2-base"
 
