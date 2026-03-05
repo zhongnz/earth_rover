@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from typing import Literal
+from typing import Literal, Optional
 
 from browser_service import BrowserService
 from rtm_client import RtmClient
@@ -94,6 +94,24 @@ app.mount("/static", StaticFiles(directory="./static"), name="static")
 browser_service = BrowserService()
 
 
+async def _requests_post(*args, **kwargs):
+    return await asyncio.to_thread(requests.post, *args, **kwargs)
+
+
+async def _requests_get(*args, **kwargs):
+    return await asyncio.to_thread(requests.get, *args, **kwargs)
+
+
+def _extract_lat_lon(payload: Optional[dict]) -> tuple[Optional[float], Optional[float]]:
+    if not isinstance(payload, dict):
+        return None, None
+    latitude = payload.get("latitude")
+    longitude = payload.get("longitude")
+    if latitude in (None, "") or longitude in (None, ""):
+        return None, None
+    return latitude, longitude
+
+
 async def auth_common():
     global auth_response_data
     auth_response_data = get_env_tokens()
@@ -159,12 +177,15 @@ def get_env_tokens():
 
 async def start_ride(headers, bot_slug, mission_slug):
     start_ride_data = {"bot_slug": bot_slug, "mission_slug": mission_slug}
-    start_ride_response = requests.post(
-        FRODOBOTS_API_URL + "/sdk/start_ride",
-        headers=headers,
-        json=start_ride_data,
-        timeout=15,
-    )
+    try:
+        start_ride_response = await _requests_post(
+            FRODOBOTS_API_URL + "/sdk/start_ride",
+            headers=headers,
+            json=start_ride_data,
+            timeout=15,
+        )
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to start mission: {exc}") from exc
 
     if start_ride_response.status_code != 200:
         raise HTTPException(
@@ -177,12 +198,15 @@ async def start_ride(headers, bot_slug, mission_slug):
 
 async def end_ride(headers, bot_slug, mission_slug):
     end_ride_data = {"bot_slug": bot_slug, "mission_slug": mission_slug}
-    end_ride_response = requests.post(
-        FRODOBOTS_API_URL + "/sdk/end_ride",
-        headers=headers,
-        json=end_ride_data,
-        timeout=15,
-    )
+    try:
+        end_ride_response = await _requests_post(
+            FRODOBOTS_API_URL + "/sdk/end_ride",
+            headers=headers,
+            json=end_ride_data,
+            timeout=15,
+        )
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to end mission: {exc}") from exc
 
     if end_ride_response.status_code != 200:
         raise HTTPException(
@@ -194,9 +218,12 @@ async def end_ride(headers, bot_slug, mission_slug):
 
 async def retrieve_tokens(headers, bot_slug):
     data = {"bot_slug": bot_slug}
-    response = requests.post(
-        FRODOBOTS_API_URL + "/sdk/token", headers=headers, json=data, timeout=15
-    )
+    try:
+        response = await _requests_post(
+            FRODOBOTS_API_URL + "/sdk/token", headers=headers, json=data, timeout=15
+        )
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to retrieve tokens: {exc}") from exc
 
     if response.status_code != 200:
         raise HTTPException(
@@ -247,12 +274,18 @@ async def get_checkpoints_list():
 
     data = {"bot_slug": bot_slug, "mission_slug": mission_slug}
 
-    response = requests.post(
-        FRODOBOTS_API_URL + "/sdk/checkpoints_list",
-        headers=headers,
-        json=data,
-        timeout=15,
-    )
+    try:
+        response = await _requests_post(
+            FRODOBOTS_API_URL + "/sdk/checkpoints_list",
+            headers=headers,
+            json=data,
+            timeout=15,
+        )
+    except requests.RequestException as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to retrieve checkpoints list: {exc}",
+        ) from exc
 
     if response.status_code != 200:
         raise HTTPException(
@@ -447,6 +480,8 @@ async def get_screenshot(view_types: str = "rear,map,front"):
 async def get_data():
     await need_start_mission()
     data = await browser_service.data()
+    if data is None:
+        raise HTTPException(status_code=503, detail="Telemetry not available")
     return JSONResponse(content=data)
 
 
@@ -464,11 +499,9 @@ async def checkpoint_reached(request: Request):
         )
 
     data = await browser_service.data()
-    latitude = data.get("latitude")
-    longitude = data.get("longitude")
-
-    if not all([latitude, longitude]):
-        raise HTTPException(status_code=400, detail="Missing latitude or longitude")
+    latitude, longitude = _extract_lat_lon(data)
+    if latitude is None or longitude is None:
+        raise HTTPException(status_code=503, detail="Missing latitude or longitude")
 
     headers = {
         "Content-Type": "application/json",
@@ -482,12 +515,18 @@ async def checkpoint_reached(request: Request):
         "longitude": longitude,
     }
 
-    response = requests.post(
-        FRODOBOTS_API_URL + "/sdk/checkpoint_reached",
-        headers=headers,
-        json=payload,
-        timeout=15,
-    )
+    try:
+        response = await _requests_post(
+            FRODOBOTS_API_URL + "/sdk/checkpoint_reached",
+            headers=headers,
+            json=payload,
+            timeout=15,
+        )
+    except requests.RequestException as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to send checkpoint data: {exc}",
+        ) from exc
 
     response_data = response.json()
 
@@ -527,7 +566,7 @@ async def missions_history():
     data = {"bot_slug": bot_slug}
 
     try:
-        response = requests.post(
+        response = await _requests_post(
             FRODOBOTS_API_URL + "/sdk/rides_history",
             headers=headers,
             json=data,
@@ -635,11 +674,9 @@ async def start_intervention(request: Request):
         raise HTTPException(status_code=500, detail="Bot name not configured")
 
     data = await browser_service.data()
-    latitude = data.get("latitude")
-    longitude = data.get("longitude")
-
-    if not all([latitude, longitude]):
-        raise HTTPException(status_code=400, detail="Missing latitude or longitude")
+    latitude, longitude = _extract_lat_lon(data)
+    if latitude is None or longitude is None:
+        raise HTTPException(status_code=503, detail="Missing latitude or longitude")
 
     headers = {
         "Content-Type": "application/json",
@@ -653,7 +690,7 @@ async def start_intervention(request: Request):
     }
 
     try:
-        response = requests.post(
+        response = await _requests_post(
             FRODOBOTS_API_URL + "/sdk/interventions/start",
             headers=headers,
             json=payload,
@@ -696,11 +733,9 @@ async def end_intervention(request: Request):
         raise HTTPException(status_code=500, detail="Bot name not configured")
 
     data = await browser_service.data()
-    latitude = data.get("latitude")
-    longitude = data.get("longitude")
-
-    if not all([latitude, longitude]):
-        raise HTTPException(status_code=400, detail="Missing latitude or longitude")
+    latitude, longitude = _extract_lat_lon(data)
+    if latitude is None or longitude is None:
+        raise HTTPException(status_code=503, detail="Missing latitude or longitude")
 
     headers = {
         "Content-Type": "application/json",
@@ -714,7 +749,7 @@ async def end_intervention(request: Request):
     }
 
     try:
-        response = requests.post(
+        response = await _requests_post(
             FRODOBOTS_API_URL + "/sdk/interventions/end",
             headers=headers,
             json=payload,
@@ -759,7 +794,7 @@ async def interventions_history():
     payload = {"bot_slug": bot_slug}
 
     try:
-        response = requests.get(
+        response = await _requests_get(
             FRODOBOTS_API_URL + "/sdk/interventions/history",
             headers=headers,
             params=payload,

@@ -9,6 +9,9 @@ load_dotenv()
 FORMAT = os.getenv("IMAGE_FORMAT", "png")
 QUALITY = float(os.getenv("IMAGE_QUALITY", "1.0"))
 HAS_REAR_CAMERA = os.getenv("HAS_REAR_CAMERA", "False").lower() == "true"
+BROWSER_ENGINE = os.getenv("BROWSER_ENGINE", "webkit").lower()
+BROWSER_HEADLESS = os.getenv("BROWSER_HEADLESS", "false").lower() == "true"
+SDK_BASE_URL = os.getenv("SDK_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
 
 if FORMAT not in ["png", "jpeg", "webp"]:
     raise ValueError("Invalid image format. Supported formats: png, jpeg, webp")
@@ -28,32 +31,40 @@ class BrowserService:
         if not self.browser:
             try:
                 self.playwright = await async_playwright().start()
-                
-                # Use WebKit (Safari's engine) - Chrome/Firefox have WebRTC issues
-                # after recent Chromium updates broke WebRTC in headless/automated browsers
-                self.browser = await self.playwright.webkit.launch(
-                    headless=False,  # WebRTC requires visible browser
-                )
-                
+
+                browser_factory = getattr(self.playwright, BROWSER_ENGINE, None)
+                if browser_factory is None:
+                    raise ValueError(
+                        f"Unsupported BROWSER_ENGINE={BROWSER_ENGINE}. "
+                        "Use one of: webkit, chromium, firefox."
+                    )
+
+                launch_kwargs = {"headless": BROWSER_HEADLESS}
+                executable_path = os.getenv("CHROME_EXECUTABLE_PATH", "").strip()
+                if BROWSER_ENGINE == "chromium" and executable_path:
+                    launch_kwargs["executable_path"] = executable_path
+
+                self.browser = await browser_factory.launch(**launch_kwargs)
+
                 self.page = await self.browser.new_page(
                     viewport=self.default_viewport,
                     extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
                 )
-                
+
                 await self.page.goto(
-                    "http://127.0.0.1:8000/sdk", 
+                    f"{SDK_BASE_URL}/sdk",
                     wait_until="networkidle"
                 )
-                
+
                 await self.page.click("#join")
-                
+
                 # Wait for Agora to connect and start streaming
                 # This delay is necessary for WebRTC connection establishment
                 await self.page.wait_for_timeout(10000)
-                
+
                 # Wait for video element
                 await self.page.wait_for_selector("video", timeout=60000)
-                
+
                 # Wait for video to have data
                 await self.page.wait_for_function(
                     """() => {
@@ -62,7 +73,7 @@ class BrowserService:
                     }""",
                     timeout=30000
                 )
-                
+
                 await self.page.wait_for_selector("#map", timeout=30000)
                 await self.page.set_viewport_size(self.default_viewport)
 
@@ -75,7 +86,7 @@ class BrowserService:
                     }});
                 }}"""
                 await self.page.evaluate(call)
-                
+
             except Exception as e:
                 print(f"Error initializing browser: {e}")
                 await self.close_browser()

@@ -6,7 +6,7 @@ import cv2
 
 
 async def fetch_and_display_image():
-    url = "http://localhost:8000/v1/front"
+    url = "http://localhost:8000/v2/front"
 
     async with aiohttp.ClientSession() as session:
         while True:
@@ -20,7 +20,7 @@ async def fetch_and_display_image():
                         image_array = np.frombuffer(image_bytes, dtype=np.uint8)
                         image = cv2.imdecode(image_array, cv2.IMREAD_COLOR)
 
-                        cv2.imshow("Rear Frame", image)
+                        cv2.imshow("Front Frame", image)
                         if cv2.waitKey(1) & 0xFF == ord("q"):
                             break
                     else:

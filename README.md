@@ -158,7 +158,11 @@ More details about the bot sensors and actuators can be found [here](https://col
 
 ## Getting Started
 
-1. Write once your .env variables provided by Frodobots team your SDK API key and the name of the bot you've got.
+1. Create your local environment file and fill in values from the FrodoBots team:
+
+```bash
+cp .env.sample .env
+```
 
 ```bash
 SDK_API_TOKEN=
@@ -173,6 +177,10 @@ IMAGE_QUALITY=0.8
 # Image format: jpeg, png or webp (default: png)
 # Recommended: jpeg for better performance and lower bandwidth usage
 IMAGE_FORMAT=jpeg
+# Browser runtime (defaults shown)
+BROWSER_ENGINE=webkit
+BROWSER_HEADLESS=false
+SDK_BASE_URL=http://127.0.0.1:8000
 ```
 
 **For Windows users:** Set `CHROME_EXECUTABLE_PATH` to:

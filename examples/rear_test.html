@@ -28,7 +28,7 @@
 
       const fetchRearFrame = async () => {
         try {
-          const response = await fetch("http://localhost:8000/v1/rear");
+          const response = await fetch("http://localhost:8000/v2/rear");
           const data = await response.json();
           rearFrame.src = `data:image/png;base64,${data.rear_frame}`;
         } catch (error) {
@@ -41,4 +41,3 @@
     </script>
   </body>
 </html>
-
