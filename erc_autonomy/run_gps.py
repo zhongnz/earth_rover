@@ -3,12 +3,50 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 
 from erc_autonomy.config import ERCConfig
 from erc_autonomy.logging_utils import setup_logging
 
 
+def _load_env() -> None:
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv(override=False)
+    except Exception:
+        pass
+
+
+def _env_str(name: str, default: str) -> str:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip()
+
+
+def _env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return int(value.strip())
+    except ValueError:
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return float(value.strip())
+    except ValueError:
+        return default
+
+
 def parse_args() -> argparse.Namespace:
+    _load_env()
     p = argparse.ArgumentParser(
         description="ERC Autonomous GPS runner (Week 1-6 scaffold)."
     )
@@ -21,6 +59,52 @@ def parse_args() -> argparse.Namespace:
         default="simple_edge",
         choices=["simple_edge", "sam2"],
         help="Traversability backend",
+    )
+    p.add_argument(
+        "--sam2-model-cfg",
+        default=_env_str("SAM2_MODEL_CFG", ""),
+        help="SAM2 model config file path (env: SAM2_MODEL_CFG)",
+    )
+    p.add_argument(
+        "--sam2-checkpoint",
+        default=_env_str("SAM2_CHECKPOINT", ""),
+        help="SAM2 checkpoint path (env: SAM2_CHECKPOINT)",
+    )
+    p.add_argument(
+        "--sam2-device",
+        default=_env_str("SAM2_DEVICE", "auto"),
+        choices=["auto", "cpu", "cuda", "mps"],
+        help="SAM2 inference device (env: SAM2_DEVICE)",
+    )
+    p.add_argument(
+        "--sam2-max-side",
+        type=int,
+        default=_env_int("SAM2_MAX_SIDE", 1024),
+        help="Resize input so longest image side <= this value before SAM2 inference (env: SAM2_MAX_SIDE)",
+    )
+    p.add_argument(
+        "--sam2-points-per-side",
+        type=int,
+        default=_env_int("SAM2_POINTS_PER_SIDE", 24),
+        help="SAM2 automatic mask generator points per side (env: SAM2_POINTS_PER_SIDE)",
+    )
+    p.add_argument(
+        "--sam2-pred-iou-thresh",
+        type=float,
+        default=_env_float("SAM2_PRED_IOU_THRESH", 0.8),
+        help="SAM2 predicted IoU threshold (env: SAM2_PRED_IOU_THRESH)",
+    )
+    p.add_argument(
+        "--sam2-stability-score-thresh",
+        type=float,
+        default=_env_float("SAM2_STABILITY_SCORE_THRESH", 0.9),
+        help="SAM2 stability score threshold (env: SAM2_STABILITY_SCORE_THRESH)",
+    )
+    p.add_argument(
+        "--sam2-min-mask-region-area",
+        type=int,
+        default=_env_int("SAM2_MIN_MASK_REGION_AREA", 0),
+        help="SAM2 minimum mask region area (pixels) (env: SAM2_MIN_MASK_REGION_AREA)",
     )
     p.add_argument(
         "--enable-motion",
@@ -118,6 +202,14 @@ def build_config(args: argparse.Namespace) -> ERCConfig:
     cfg.stale_sensor_ms = args.stale_ms
     cfg.request_timeout_s = args.request_timeout
     cfg.traversability_backend = args.traversability_backend
+    cfg.sam2_model_cfg = args.sam2_model_cfg
+    cfg.sam2_checkpoint = args.sam2_checkpoint
+    cfg.sam2_device = args.sam2_device
+    cfg.sam2_max_side = args.sam2_max_side
+    cfg.sam2_points_per_side = args.sam2_points_per_side
+    cfg.sam2_pred_iou_thresh = args.sam2_pred_iou_thresh
+    cfg.sam2_stability_score_thresh = args.sam2_stability_score_thresh
+    cfg.sam2_min_mask_region_area = args.sam2_min_mask_region_area
     cfg.enable_motion = args.enable_motion
     cfg.max_linear = args.max_linear
     cfg.max_angular = args.max_angular

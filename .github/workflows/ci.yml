@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  safety-gates:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Compile Python sources
+        run: |
+          python -m compileall main.py browser_service.py erc_autonomy indoor_nav examples
+
+      - name: Run fallback regression tests
+        run: |
+          python -m unittest erc_autonomy.tests.test_traversability_fallback
+
+      - name: CLI smoke checks
+        run: |
+          python -m erc_autonomy.run_gps --help > /dev/null
+          python -m erc_autonomy.bench_traversability --help > /dev/null
+          python -m erc_autonomy.check_sam2 --help > /dev/null

@@ -30,6 +30,14 @@ conda activate erv
 pip install -r requirements.txt
 ```
 
+Optional (GPS SAM2 traversability backend):
+```bash
+# Install torch for your platform first (CPU/CUDA), then:
+pip install -r erc_autonomy/requirements_sam2.txt
+scripts/setup_sam2.sh --variant sam2.1_hiera_large
+python -m erc_autonomy.check_sam2
+```
+
 **For Windows users:**
 ```bash
 pip install windows-curses

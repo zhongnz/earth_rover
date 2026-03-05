@@ -1,0 +1,18 @@
+# Optional dependencies for the ERC SAM2 traversability backend.
+#
+# Install base deps first:
+#   pip install -r requirements.txt
+#
+# Then install SAM2 deps:
+#   pip install -r erc_autonomy/requirements_sam2.txt
+#
+# NOTE: SAM2 requires PyTorch. Install torch matching your platform/GPU first.
+# Examples:
+#   CPU-only: pip install torch torchvision
+#   CUDA:     follow https://pytorch.org/get-started/locally/
+
+# Pinned SAM2 source for reproducibility.
+git+https://github.com/facebookresearch/sam2.git@2b90b9f5ceec907a1c18123530e92e794ad901a4
+
+# Used to decode COCO-RLE masks when SAM2 returns compressed segmentations.
+pycocotools==2.0.8

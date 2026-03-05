@@ -41,6 +41,14 @@ class ERCConfig:
 
     # Traversability + BEV (Week 3)
     traversability_backend: str = "simple_edge"
+    sam2_model_cfg: str = ""
+    sam2_checkpoint: str = ""
+    sam2_device: str = "auto"  # auto|cpu|cuda|mps
+    sam2_max_side: int = 1024
+    sam2_points_per_side: int = 24
+    sam2_pred_iou_thresh: float = 0.8
+    sam2_stability_score_thresh: float = 0.9
+    sam2_min_mask_region_area: int = 0
     bev_width_m: float = 4.0
     bev_depth_m: float = 6.0
     bev_resolution_m: float = 0.1

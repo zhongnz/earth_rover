@@ -10,3 +10,4 @@ logs/
 plots/
 matches/
 exported_frames/
+.models/
