@@ -200,6 +200,8 @@ Core variables:
 - `SDK_API_TOKEN`
 - `BOT_SLUG`
 - `MISSION_SLUG` (required for scored mission workflows)
+  - Plain-English: the unique mission identifier provided by organizers/FrodoBots for a specific scored run configuration.
+  - If empty, mission-only endpoints are not active.
 - `MAP_ZOOM_LEVEL`
 - `IMAGE_QUALITY`
 - `IMAGE_FORMAT`
@@ -313,3 +315,46 @@ Recommended next steps:
 - Integrate a real SAM2 traversability backend in `erc_autonomy/traversability.py`.
 - Expand formal tests for mission/intervention edge cases and stream loss.
 - Continue DINOv2-vs-DINOv3 A/B evaluation on indoor goals before changing defaults.
+
+## 13) Teammate Onboarding Checklist
+
+Use this for first-day setup:
+
+1. Clone repo and create env:
+
+```bash
+git clone <repo-url>
+cd nyu-earthrover
+conda create -n erv python=3.11
+conda activate erv
+pip install -r requirements.txt
+```
+
+2. Configure runtime:
+
+```bash
+cp .env.sample .env
+```
+
+Set at minimum: `SDK_API_TOKEN`, `BOT_SLUG`. Add `MISSION_SLUG` only for scored mission runs.
+
+3. Start SDK bridge and verify APIs:
+
+```bash
+hypercorn main:app --reload
+curl http://127.0.0.1:8000/openapi.json
+curl http://127.0.0.1:8000/v2/front
+```
+
+4. Run one baseline tool:
+
+```bash
+python examples/exploration.py --url http://127.0.0.1:8000 --rate 5 --out logs/first_run.h5
+```
+
+5. Choose a workstream:
+
+- Mission backend hardening (`main.py`, `browser_service.py`)
+- GPS autonomy (`erc_autonomy/`)
+- Indoor autonomy (`indoor_nav/`)
+- Data/analysis pipeline (`examples/utils/`)
