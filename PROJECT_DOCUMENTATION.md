@@ -646,13 +646,28 @@ Optional indoor extras (`indoor_nav/requirements_indoor.txt`):
 
 ### 13.1 Why these tools are used
 
-1. FastAPI + Hypercorn: clear local API contracts and production-grade ASGI serving.
-2. Playwright: robust browser automation bridge to SDK stream/signaling runtime.
-3. aiohttp: non-blocking polling/control at loop frequencies needed by autonomy.
-4. OpenCV/NumPy: fast, inspectable CV and numeric primitives for planning/perception.
-5. h5py/matplotlib: practical experiment loop (log -> analyze -> tune).
-6. Transformers/PyTorch: unified integration path for modern vision and VLM/VLA models.
-7. SAM2 + setup script: reproducible optional high-capability traversability backend.
+The tooling matrix below gives the implementation-level answer for each major tool: what it is, where it is used, how it is used in this repo, why it was chosen, and supporting references.
+
+### 13.2 Tooling Matrix
+
+| Tool | What | Where | How | Rationale | Supporting references |
+|---|---|---|---|---|---|
+| FastAPI | ASGI web framework for local bridge APIs | `main.py` | Defines async REST endpoints for control/data/mission/intervention flows | Keeps a stable local contract for all autonomy clients | https://fastapi.tiangolo.com/ |
+| Hypercorn | ASGI application server | `Dockerfile`, local runbook in Section 14 | Serves `main:app` for local and container runtime | Production-capable async serving for FastAPI app | https://hypercorn.readthedocs.io/en/latest/index.html |
+| Pydantic | Data validation/modeling | `main.py` | Validates request/response payload models at API boundary | Reduces malformed payload errors and keeps API contracts explicit | https://docs.pydantic.dev/latest/ |
+| Playwright | Browser automation runtime | `browser_service.py` | Launches browser engine, joins `/sdk`, captures frames/telemetry, injects controls via JS bridge | SDK media/signaling is browser-native; automation is required for bridge operation | https://playwright.dev/python/docs/intro |
+| python-dotenv | `.env` loader | `browser_service.py`, `erc_autonomy/run_gps.py`, `erc_autonomy/check_sam2.py` | Loads env vars with safe defaults before runtime init | Consistent local configuration across scripts and services | https://pypi.org/project/python-dotenv/ |
+| requests | Sync HTTP client | `main.py` | Calls cloud mission/intervention APIs via `asyncio.to_thread(...)` wrappers | Mature HTTP client for low-rate cloud API calls while preserving FastAPI loop responsiveness | https://requests.readthedocs.io/en/latest/ |
+| aiohttp | Async HTTP client | `erc_autonomy/sdk_io.py`, `indoor_nav/modules/sdk_client.py` | High-frequency non-blocking polling/control and mission calls | Required for 10 Hz class control loops without blocking | https://docs.aiohttp.org/en/stable/ |
+| OpenCV | Computer vision primitives | `erc_autonomy/traversability.py`, `indoor_nav/modules/obstacle_avoidance.py`, image decode paths | Canny/blur/morphology/resize/decode for frame processing and safety signals | Fast, inspectable CV building blocks with broad ecosystem support | https://docs.opencv.org/4.x/ |
+| NumPy | Numeric array compute | `erc_autonomy/*`, `indoor_nav/*` modules | Vectorized scoring, filtering, cost/traversability calculations | Simple, deterministic numerical core for planning/perception logic | https://numpy.org/doc/stable/ |
+| h5py | HDF5 logging backend | `examples/utils/data_logger.py`, `indoor_nav/agent.py` logger integration | Stores telemetry/controls/frames in structured experiment logs | Enables repeatable offline analysis and debugging | https://docs.h5py.org/en/stable/ |
+| Matplotlib | Plotting/analysis | `examples/utils/analyze_log.py` | Produces telemetry/path/control plots from HDF5 logs | Fast tuning loop from recorded runs to parameter updates | https://matplotlib.org/stable/ |
+| PyTorch | Deep learning runtime | `indoor_nav/policies/*`, `indoor_nav/modules/checkpoint_manager.py`, optional SAM2 path | Loads and runs model inference for VPR/VLM/VLA/depth components | De facto runtime for modern model ecosystems used by this stack | https://pytorch.org/docs/stable/ |
+| Transformers | Model loading/inference interfaces | `indoor_nav/modules/checkpoint_manager.py`, `indoor_nav/policies/*`, obstacle models | Uses pretrained HF models for feature extraction and policy backends | Unifies model integration and reduces custom model plumbing | https://huggingface.co/docs/transformers/index |
+| SAM2 | Foundation segmentation model (optional traversability backend) | `erc_autonomy/traversability.py`, `scripts/setup_sam2.sh`, `erc_autonomy/check_sam2.py`, `erc_autonomy/bench_traversability.py` | Builds automatic mask generator from pinned config/checkpoint and converts masks to traversability | Higher-capability optional backend with explicit fallback to baseline when unavailable | https://github.com/facebookresearch/sam2 , https://arxiv.org/abs/2408.00714 |
+| pycocotools | COCO mask utilities | `erc_autonomy/traversability.py` | Decodes compressed RLE masks returned by some SAM2 builds | Keeps compatibility across SAM2 output formats | https://github.com/cocodataset/cocoapi |
+| GitHub Actions | CI automation | `.github/workflows/ci.yml` | Runs compile, fallback unit test, and CLI smoke checks on push/PR | Early regression detection for critical runtime paths | https://docs.github.com/actions |
 
 ## 14. Deployment and Operations
 
@@ -1038,4 +1053,3 @@ This appendix mirrors current dataclass defaults so operators and developers can
 3. loop runs but no progress -> matcher threshold/model choice issue.
 4. frequent emergency stops -> obstacle thresholds/backend tuning issue.
 5. repeated recovery loops -> control gains/speed caps/topological strategy mismatch.
-
