@@ -7,6 +7,7 @@ SOTA defaults (2025):
   - Goal matching: DINOv2-VLAD with registers (AnyLoc-style VPR)
     Refs: Oquab et al. arXiv:2304.07193, Darcet et al. arXiv:2309.16588,
           Keetha et al. arXiv:2308.00688
+  - Optional toggle: DINOv3-VLAD (released 2025, arXiv:2508.10104)
   - VLM: Qwen2.5-VL 7B (best open VLM, native multi-image)
     Ref: Bai et al. arXiv:2502.13923
   - Depth: Depth Anything V2 Base (fast + accurate relative depth)
@@ -94,8 +95,8 @@ class PolicyConfig:
 # ---------------------------------------------------------------------------
 @dataclass
 class GoalConfig:
-    # Image-goal matching (SOTA: DINOv2-VLAD for visual place recognition)
-    match_method: str = "dinov2_vlad"     # CHANGED: "dinov2_vlad", "siglip2", "dinov2",
+    # Image-goal matching (SOTA: DINOv2-VLAD / DINOv3-VLAD for visual place recognition)
+    match_method: str = "dinov2_vlad"     # CHANGED: "dinov2_vlad", "dinov3_vlad", "siglip2", "dinov2",
                                           # "eigenplaces", "clip", "sift"
     match_threshold: float = 0.78         # cosine similarity to declare "arrived"
     approach_threshold: float = 0.60      # start slowing down
@@ -109,7 +110,7 @@ class GoalConfig:
     feature_device: str = "cuda"
     feature_image_size: tuple = (224, 224)
 
-    # VLAD aggregation (for dinov2_vlad method)
+    # VLAD aggregation (for dinov2_vlad / dinov3_vlad methods)
     vlad_clusters: int = 32              # number of VLAD cluster centers
 
 
