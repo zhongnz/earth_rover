@@ -254,6 +254,30 @@ Important consequence: state is process-local and resets when server restarts.
 
 CORS is configured as permissive (`*`) in current implementation. Suitable for local dev; production hardening should constrain origins/methods.
 
+### 5.6 Complete Endpoint Status Matrix (Bridge)
+
+The table below makes endpoint outcomes explicit for current `main.py` behavior.
+
+| Endpoint | Method(s) | Success | Explicit failure codes | Notes |
+|---|---|---|---|---|
+| `/` | `GET` | `200` HTML | `400` (mission guard when `MISSION_SLUG` set and mission not started), `5xx` runtime | Spectator view render path |
+| `/sdk` | `GET` | `200` HTML | `400` (mission guard), `5xx` runtime | Driver view render path |
+| `/start-mission` | `POST` | `200` JSON | `400` missing env vars, propagated upstream `4xx/5xx`, `502` transport failures | Requires `SDK_API_TOKEN`, `BOT_SLUG`, `MISSION_SLUG` |
+| `/end-mission` | `POST` | `200` JSON | `400` missing env vars, propagated upstream `4xx/5xx`, `502/500` failures | Clears in-memory auth/checkpoint caches on success |
+| `/checkpoints-list` | `GET`, `POST` | `200` JSON | `400` mission guard, `500` missing auth/bot env, `502` transport, propagated upstream `4xx/5xx` | Returns/refreshes checkpoint list |
+| `/control` | `POST` | `200` JSON | `400` missing command or mission guard, `500` send failure | Browser JS control path (`window.sendMessage`) |
+| `/control-legacy` | `POST` | `200` JSON | `400` missing command or mission guard, `5xx` runtime | Direct Agora RTM legacy path |
+| `/screenshot` | `GET` | `200` JSON | `400` invalid `view_types`, `500` file/read/runtime errors | Returns base64 screenshots from `screenshots/` |
+| `/v2/screenshot` | `GET` | `200` JSON | `400` mission guard, `404` no frames, `5xx` runtime | Front always attempted; rear added for `BOT_TYPE=zero` |
+| `/v2/front` | `GET` | `200` JSON | `400` mission guard, `404` frame unavailable, `5xx` runtime | Returns `front_frame` + timestamp |
+| `/v2/rear` | `GET` | `200` JSON | `400` mission guard, `404` frame unavailable, `5xx` runtime | Rear may be unavailable for non-zero bots |
+| `/data` | `GET` | `200` JSON | `400` mission guard, `503` telemetry unavailable, `5xx` runtime | Returns latest telemetry snapshot |
+| `/checkpoint-reached` | `POST` | `200` JSON | `400` mission guard, `500` missing env vars, `503` missing lat/lon, `502` transport, propagated upstream `4xx/5xx` | Includes proximate distance detail on failure payload |
+| `/missions-history` | `GET` | `200` JSON | propagated upstream `4xx/5xx`, `500` request exceptions | Uses cloud API history endpoint |
+| `/interventions/start` | `POST` | `200` JSON | `400` mission guard, `500` missing env vars/request exceptions, `503` missing lat/lon, propagated upstream `4xx/5xx` | Includes `intervention_id` on success |
+| `/interventions/end` | `POST` | `200` JSON | `400` mission guard, `500` missing env vars/request exceptions, `503` missing lat/lon, propagated upstream `4xx/5xx` | Ends active intervention |
+| `/interventions/history` | `GET` | `200` JSON | `500` missing env vars/request exceptions, propagated upstream `4xx/5xx` | Cloud proxy endpoint |
+
 ## 6. Browser Runtime Adapter Specification (`browser_service.py`)
 
 ### 6.1 Responsibilities
@@ -730,6 +754,28 @@ Optional capabilities are enabled only under these conditions:
 - Mission/intervention APIs depend on external FrodoBots cloud availability.
 - Media/signaling path depends on Agora runtime in SDK UI session.
 
+### 12.8 Units, Ranges, and Type Contracts
+
+This section makes data semantics explicit where implementation depends on unit assumptions.
+
+| Field / signal | Type | Units / range | Source of truth |
+|---|---|---|---|
+| `command.linear` | float | normalized command in `[-1.0, 1.0]` | Bridge/API contract (`/control`) |
+| `command.angular` | float | normalized command in `[-1.0, 1.0]` | Bridge/API contract (`/control`) |
+| `command.lamp` | int | `{0,1}` semantic in current usage | Bridge/API contract |
+| `timestamp` in `/v2/*` and `/data` payloads | float | Unix epoch seconds | SDK/bridge runtime payload |
+| `orientation` telemetry | float | degrees (consumed as degrees, converted to radians in GPS estimator) | SDK telemetry payload |
+| `latitude`, `longitude` telemetry | float | decimal degrees | SDK telemetry payload |
+| `source_latency_ms` (`erc_autonomy.SensorPacket`) | float | milliseconds | computed in `erc_autonomy/sdk_io.py` |
+| `StateEstimate.x_m`, `y_m` | float | meters in local ENU frame | computed in `erc_autonomy/state_estimator.py` |
+| `StateEstimate.yaw_rad` | float | radians | computed in `erc_autonomy/state_estimator.py` |
+| `StateEstimate.speed_mps` | float | treated as m/s by estimator and recovery logic | mapped from SDK `speed` telemetry field |
+| `goal_turn_hint` | float | normalized `[-1,1]` (bearing error / pi) | `erc_autonomy/goal_manager.py` |
+| `goal_similarity` (indoor) | float | normalized similarity score in `[0,1]` by matcher logic | `indoor_nav/modules/checkpoint_manager.py` |
+| `PolicyOutput.linear/angular` (indoor) | float | normalized command in `[-1,1]` | `indoor_nav/policies/base_policy.py` |
+| `ObstacleInfo.speed_factor` | float | multiplier in `[0,1]` | `indoor_nav/modules/obstacle_avoidance.py` |
+| `ObstacleInfo.steer_bias` | float | additive steering bias in `[-1,1]` expected domain | `indoor_nav/modules/obstacle_avoidance.py` |
+
 ## 13. Dependency and Tooling Specification
 
 Base runtime (`requirements.txt`):
@@ -768,15 +814,92 @@ The tooling matrix below gives the implementation-level answer for each major to
 | aiohttp | Async HTTP client | `erc_autonomy/sdk_io.py`, `indoor_nav/modules/sdk_client.py` | High-frequency non-blocking polling/control and mission calls | Required for 10 Hz class control loops without blocking | https://docs.aiohttp.org/en/stable/ |
 | OpenCV | Computer vision primitives | `erc_autonomy/traversability.py`, `indoor_nav/modules/obstacle_avoidance.py`, image decode paths | Canny/blur/morphology/resize/decode for frame processing and safety signals | Fast, inspectable CV building blocks with broad ecosystem support | https://docs.opencv.org/4.x/ |
 | NumPy | Numeric array compute | `erc_autonomy/*`, `indoor_nav/*` modules | Vectorized scoring, filtering, cost/traversability calculations | Simple, deterministic numerical core for planning/perception logic | https://numpy.org/doc/stable/ |
+| pynput | Keyboard input capture utility | `examples/utils/keyboard_control.py` | Reads local keyboard events for teleoperation controls | Lightweight teleop/debug path during data collection and SDK validation | https://pypi.org/project/pynput/ |
 | h5py | HDF5 logging backend | `examples/utils/data_logger.py`, `indoor_nav/agent.py` logger integration | Stores telemetry/controls/frames in structured experiment logs | Enables repeatable offline analysis and debugging | https://docs.h5py.org/en/stable/ |
 | Matplotlib | Plotting/analysis | `examples/utils/analyze_log.py` | Produces telemetry/path/control plots from HDF5 logs | Fast tuning loop from recorded runs to parameter updates | https://matplotlib.org/stable/ |
 | PyTorch | Deep learning runtime | `indoor_nav/policies/*`, `indoor_nav/modules/checkpoint_manager.py`, optional SAM2 path | Loads and runs model inference for VPR/VLM/VLA/depth components | De facto runtime for modern model ecosystems used by this stack | https://pytorch.org/docs/stable/ |
+| Torchvision | Vision model/data utilities for PyTorch stack | `indoor_nav/policies/vla_policy.py`, optional model paths | Pre/post transforms and model interoperability for vision backends | Standard companion library for PyTorch vision workflows | https://pytorch.org/vision/stable/index.html |
 | Transformers | Model loading/inference interfaces | `indoor_nav/modules/checkpoint_manager.py`, `indoor_nav/policies/*`, obstacle models | Uses pretrained HF models for feature extraction and policy backends | Unifies model integration and reduces custom model plumbing | https://huggingface.co/docs/transformers/index |
+| Pillow | Image conversion utility for model inference | `indoor_nav/modules/checkpoint_manager.py`, `indoor_nav/policies/*`, obstacle model wrappers | Converts OpenCV BGR arrays to PIL format required by many model processors | Compatibility layer between CV pipeline and model runtimes | https://pillow.readthedocs.io/ |
+| SciPy | Scientific compute utilities (optional indoor extras) | `indoor_nav/requirements_indoor.txt` | Available for advanced matching/filtering/statistical utilities when needed | Supports algorithm experimentation without custom numeric reimplementation | https://docs.scipy.org/doc/scipy/ |
+| Agora RTC Web SDK | Browser media transport runtime | `static/AgoraRTC_N-4.1.0.js`, `static/basicVideoCall.js`, `index.html` | Joins video channel and provides camera stream playback in SDK UI | Required media layer for rover stream path used by bridge capture | https://api-ref.agora.io/en/video-sdk/web/4.x/index.html |
+| Agora RTM / Signaling SDK | Browser telemetry/command signaling runtime | `static/agora-rtm-sdk-1.4.0.js`, `static/basicRtm.js`, `index.html` | Exchanges telemetry and command messages in SDK UI session | Required signaling path backing `/data` and command injection | https://api-ref.agora.io/en/signaling-sdk/web/1.x/index.html |
+| Leaflet | Web map rendering library | `index.html`, `static/map.js` | Renders map and checkpoints in SDK UI | Provides geospatial context to operators and browser runtime | https://leafletjs.com/ |
+| VLM-Hybrid Policy | Hierarchical policy that combines low-rate VLM reasoning with high-rate reactive control | `indoor_nav/policies/vlm_hybrid_policy.py`, `indoor_nav/agent.py`, `indoor_nav/run_indoor.py` | Periodically queries a VLM with current/goal images, parses structured instruction, and blends it with obstacle/reactive control at loop rate | Keeps semantic navigation behavior without giving direct low-level control to an LLM | https://arxiv.org/abs/2502.13923 , https://arxiv.org/abs/2407.07775 |
+| Qwen2.5-VL | Default VLM model target for indoor `vlm_hybrid` mode | `indoor_nav/configs/config.py`, `indoor_nav/run_indoor.py` | Used as default `vlm_model` (`Qwen/Qwen2.5-VL-7B-Instruct`) through OpenAI-compatible payload format | Strong open VLM baseline with multimodal support and structured outputs | https://arxiv.org/abs/2502.13923 |
+| VLM API Protocol Adapters | Provider protocol layer for VLM requests | `indoor_nav/policies/vlm_hybrid_policy.py` | Supports OpenAI-compatible chat completions, Ollama generate API, and Anthropic messages API | Decouples policy logic from provider-specific request/response formats | https://platform.openai.com/docs/api-reference/chat/create , https://docs.ollama.com/api , https://docs.anthropic.com/en/api/messages |
+| vLLM (optional) | Local/remote OpenAI-compatible inference serving stack for VLMs | `indoor_nav/requirements_indoor.txt` (optional dependency path), `indoor_nav/run_indoor.py` endpoint config | Serves multimodal models behind OpenAI-compatible endpoint consumed by `vlm_hybrid_policy.py` | Allows local controllable VLM inference without hard provider lock-in | https://docs.vllm.ai/en/latest/ |
 | DINOv2-VLAD | Visual place-recognition matcher (indoor goal matching baseline) | `indoor_nav/modules/checkpoint_manager.py`, `indoor_nav/configs/config.py`, `indoor_nav/run_indoor.py` | Extracts DINOv2 patch tokens and aggregates with VLAD for goal-image similarity scoring | Strong recall/robustness baseline for image-goal checkpointing | https://arxiv.org/abs/2304.07193 , https://arxiv.org/abs/2308.00688 , https://arxiv.org/abs/2309.16588 |
 | DINOv3-VLAD | Optional visual place-recognition matcher (A/B toggle) | `indoor_nav/modules/checkpoint_manager.py`, `indoor_nav/configs/config.py`, `indoor_nav/eval_match_ab.py`, `indoor_nav/run_indoor.py` | Uses DINOv3 features with the same VLAD pipeline and is evaluated against DINOv2-VLAD via `eval_match_ab.py` | Controlled upgrade path: benchmark newer representation before changing defaults | https://arxiv.org/abs/2508.10104 |
 | SAM2 | Foundation segmentation model (optional traversability backend) | `erc_autonomy/traversability.py`, `scripts/setup_sam2.sh`, `erc_autonomy/check_sam2.py`, `erc_autonomy/bench_traversability.py` | Builds automatic mask generator from pinned config/checkpoint and converts masks to traversability | Higher-capability optional backend with explicit fallback to baseline when unavailable | https://github.com/facebookresearch/sam2 , https://arxiv.org/abs/2408.00714 |
 | pycocotools | COCO mask utilities | `erc_autonomy/traversability.py` | Decodes compressed RLE masks returned by some SAM2 builds | Keeps compatibility across SAM2 output formats | https://github.com/cocodataset/cocoapi |
 | GitHub Actions | CI automation | `.github/workflows/ci.yml` | Runs compile, fallback unit test, and CLI smoke checks on push/PR | Early regression detection for critical runtime paths | https://docs.github.com/actions |
+
+### 13.3 Complete Backend Enumeration (Implemented Choices)
+
+This section enumerates all backend switches currently implemented in code paths.
+
+1. GPS traversability backend (`erc_autonomy.run_gps --traversability-backend`):
+- `simple_edge`
+- `sam2`
+
+2. GPS SAM2 device selector (`erc_autonomy.run_gps --sam2-device`):
+- `auto`
+- `cpu`
+- `cuda`
+- `mps`
+
+3. Indoor policy backend (`indoor_nav.run_indoor.py --policy`):
+- `nomad`
+- `vint`
+- `vlm_hybrid`
+- `vla`
+- `heuristic`
+
+4. Indoor goal matching backend (`indoor_nav.run_indoor.py --match-method`):
+- `dinov2_vlad`
+- `dinov3_vlad`
+- `siglip2`
+- `dinov2`
+- `eigenplaces`
+- `clip`
+- `sift`
+
+5. Indoor obstacle backend (`indoor_nav.run_indoor.py --obstacle-method`):
+- `depth_anything`
+- `depth_pro`
+- `simple_edge`
+
+6. Indoor VLM API payload format (`PolicyConfig.vlm_api_format` and auto-detect logic):
+- `openai`
+- `ollama`
+- `anthropic`
+
+7. Indoor VLA backend (`PolicyConfig.vla_backend`):
+- `openvla`
+- `octo`
+- `heuristic_plus`
+
+8. Indoor topological feature method (`TopoMemoryConfig.feature_method`):
+- `histogram`
+- `dinov2` (placeholder path in current implementation)
+
+### 13.4 Default Selection and Fallback Behavior (Explicit)
+
+1. GPS defaults:
+- Traversability backend default is `simple_edge`.
+- `sam2` is opt-in and falls back to `simple_edge` on missing assets/import/build/inference failures.
+
+2. Indoor defaults:
+- Policy backend default is `vlm_hybrid`.
+- Goal matcher default is `dinov2_vlad`.
+- Obstacle backend default is `depth_anything`.
+
+3. Fallback examples:
+- `vla` path falls back to heuristic-plus when model load fails.
+- `nomad`/`vint` paths fall back to heuristic behavior when model unavailable.
+- `vlm_hybrid` runs without remote VLM calls when endpoint is unset.
+- `depth_pro` path falls back to `depth_anything` when unavailable.
 
 ## 14. Deployment and Operations
 
@@ -1162,3 +1285,221 @@ This appendix mirrors current dataclass defaults so operators and developers can
 3. loop runs but no progress -> matcher threshold/model choice issue.
 4. frequent emergency stops -> obstacle thresholds/backend tuning issue.
 5. repeated recovery loops -> control gains/speed caps/topological strategy mismatch.
+
+## 21. End-to-End Process Walkthrough
+
+This section is the full operational walkthrough across both autonomy subsystems and all supporting tools.
+
+### 21.1 System-Wide End-to-End Flow (Common Path)
+
+The two autonomy subsystems share the same lower runtime stack (`main.py` + `browser_service.py` + SDK web runtime).
+
+```mermaid
+flowchart TD
+    A[Operator: configure .env] --> B[Start bridge: hypercorn main:app]
+    B --> C[Open /sdk and Join]
+    C --> D[Browser runtime active<br/>Agora RTC + RTM]
+    D --> E[Local bridge endpoints active<br/>/data /v2/front /control mission APIs]
+    E --> F{Select subsystem}
+    F --> G[GPS subsystem<br/>python -m erc_autonomy.run_gps ...]
+    F --> H[Indoor subsystem<br/>python indoor_nav/run_indoor.py ...]
+    G --> I[Control + mission scoring loop]
+    H --> J[Goal-conditioned indoor loop]
+    I --> K[Mission complete / stop]
+    J --> K
+```
+
+### 21.2 Shared Runtime Data/Control Plane Sequence
+
+```mermaid
+sequenceDiagram
+    participant Op as Operator/Runner
+    participant GPS as GPS/Indoor Client
+    participant API as FastAPI Bridge (main.py)
+    participant BS as BrowserService
+    participant UI as SDK UI (/sdk)
+    participant RV as Remote Rover
+
+    Op->>API: Start service + mission/session endpoints
+    Op->>UI: Join channel in browser
+    UI-->>RV: RTC/RTM connection established
+    GPS->>API: GET /data, GET /v2/front, POST /control
+    API->>BS: JS-eval telemetry/frame and sendMessage(command)
+    BS->>UI: read window.rtm_data / frame helper / control injection
+    UI-->>RV: control command over signaling
+    RV-->>UI: telemetry + media
+    UI-->>BS: updated frame + telemetry state
+    BS-->>API: JSON/base64 payload
+    API-->>GPS: normalized local API response
+```
+
+### 21.3 GPS Subsystem End-to-End (`erc_autonomy`)
+
+#### 21.3.1 Process Steps
+
+1. Preflight and optional backend setup:
+- install base dependencies (`requirements.txt`)
+- optional: install SAM2 extras, run `scripts/setup_sam2.sh`, run `python -m erc_autonomy.check_sam2`
+
+2. Runner startup:
+- parse CLI/env config in `run_gps.py`
+- initialize mission runner modules (`sdk_io`, estimator, traversability, BEV, planner, goal manager, recovery, watchdog)
+- optional mission start (`--start-mission`)
+
+3. Main control loop:
+- poll `/v2/screenshot` and `/data` concurrently
+- update state estimate
+- run traversability backend (`simple_edge` or `sam2`)
+- project traversability into BEV map
+- compute goal turn hint from checkpoints
+- plan local command and apply checkpoint-based modulation
+- apply recovery override when stuck
+- send `/control` command
+- attempt `/checkpoint-reached` near threshold and refresh `/checkpoints-list`
+- watchdog stale-sensor safe stop when data ages out
+
+4. Shutdown:
+- safe stop pulse
+- optional mission end (`--end-mission`)
+- close async sessions
+
+#### 21.3.2 GPS Flow Diagram
+
+```mermaid
+flowchart TD
+    A[run_gps.py parse config] --> B[AutonomousMissionRunner startup]
+    B --> C[Optional /start-mission]
+    C --> D[Loop tick]
+    D --> E[SDKIO poll: /v2/screenshot + /data]
+    E --> F[StateEstimator update]
+    F --> G[TraversabilityEngine infer]
+    G --> H[BEVMapper project]
+    H --> I[GoalManager turn hint]
+    I --> J[PathFusionPlanner command proposal]
+    J --> K{Recovery active?}
+    K -- yes --> L[Recovery override command]
+    K -- no --> M[Use planned command]
+    L --> N[POST /control]
+    M --> N
+    N --> O[Checkpoint attempt + refresh]
+    O --> P[Watchdog stale check]
+    P --> Q{stop requested?}
+    Q -- no --> D
+    Q -- yes --> R[Safe stop + optional /end-mission + close]
+```
+
+### 21.4 Indoor Subsystem End-to-End (`indoor_nav`)
+
+#### 21.4.1 Process Steps
+
+1. Startup/config:
+- parse CLI in `run_indoor.py`
+- build `IndoorNavConfig` (policy, matcher, obstacle backend, topo/recovery/logging options)
+
+2. Setup:
+- initialize policy backend
+- load goal images/checkpoint sequence
+- initialize obstacle detector (if enabled)
+- initialize topological memory (if enabled)
+- verify bridge connectivity via `/data` and `/v2/front`
+
+3. Main control loop:
+- fetch frame + telemetry concurrently
+- update topological map
+- compute goal similarity/trend
+- detect obstacles -> speed factor/steer bias/emergency stop
+- policy predict (`vlm_hybrid`, `vla`, `nomad/vint`, or heuristic)
+- for `vlm_hybrid`, optionally trigger async VLM query based on interval/scene-change
+- smooth and clamp command
+- send `/control`
+- stuck detection and recovery behavior when needed
+- checkpoint progression and mission completion handling
+
+4. Shutdown:
+- send stop commands
+- close HTTP session and logger resources
+
+#### 21.4.2 Indoor Flow Diagram
+
+```mermaid
+flowchart TD
+    A[run_indoor.py parse config] --> B[IndoorNavigationAgent setup]
+    B --> C[Load policy + goals + optional modules]
+    C --> D[Connectivity check /data + /v2/front]
+    D --> E[Loop tick]
+    E --> F[Fetch frame + telemetry]
+    F --> G[TopologicalMemory update]
+    G --> H[CheckpointManager similarity/trend]
+    H --> I[ObstacleDetector]
+    I --> J{Emergency stop?}
+    J -- yes --> K[Stop + RecoveryManager execute]
+    J -- no --> L[Policy predict action]
+    L --> M{Policy is VLM hybrid and query due?}
+    M -- yes --> N[Async VLM query]
+    M -- no --> O[Skip query]
+    N --> P[Smooth + clamp command]
+    O --> P
+    P --> Q[POST /control]
+    Q --> R{Stuck?}
+    R -- yes --> S[Recovery behavior]
+    R -- no --> T[Continue]
+    S --> T
+    T --> U{All checkpoints reached?}
+    U -- no --> E
+    U -- yes --> V[Stop + shutdown]
+```
+
+### 21.5 Tools Supporting Each Process Stage
+
+| Stage | Common tools | GPS-specific tools | Indoor-specific tools | Purpose |
+|---|---|---|---|---|
+| Service boot + API contracts | FastAPI, Hypercorn, Pydantic, python-dotenv | — | — | Start local bridge and enforce request/response contracts |
+| Browser/media/signaling runtime | Playwright, Agora RTC, Agora RTM, Leaflet | — | — | Maintain live stream/telemetry session and map UI |
+| High-rate transport | aiohttp, requests | `erc_autonomy/sdk_io.py` wrappers | `indoor_nav/modules/sdk_client.py` wrappers | Non-blocking control/data polling and mission proxy calls |
+| Perception primitives | OpenCV, NumPy | simple_edge/SAM2 traversability, BEV projection | goal matching, obstacle depth/edge processing | Convert raw frames to traversability, similarity, and obstacle signals |
+| Foundation models (optional/selected) | PyTorch, Transformers, Torchvision, Pillow, SciPy | SAM2 (+pycocotools) | DINOv2/DINOv3/SigLIP2, Qwen2.5-VL/OpenVLA/NoMaD paths | Advanced perception and policy backends |
+| Safety/recovery/control logic | NumPy | watchdog + recovery FSM + checkpoint modulation | obstacle emergency stop + recovery hierarchy | Keep behavior bounded under uncertainty/failure |
+| Logging/analysis | h5py, matplotlib | structured JSON status logs | HDF5 run logs + diagnostics | Inspect, benchmark, and tune behavior |
+| CI/regression | GitHub Actions | fallback + CLI smoke checks | integration/config checks | Prevent regressions in critical runtime paths |
+
+### 21.6 End-to-End Operator Command Checklist
+
+1. Bridge bring-up:
+
+```bash
+cp .env.sample .env
+hypercorn main:app --reload
+```
+
+2. SDK readiness checks:
+
+```bash
+curl http://127.0.0.1:8000/openapi.json
+curl http://127.0.0.1:8000/data
+curl http://127.0.0.1:8000/v2/front
+```
+
+3. GPS run (baseline):
+
+```bash
+python -m erc_autonomy.run_gps --url http://127.0.0.1:8000 --loop-hz 10
+```
+
+4. GPS run (SAM2 path, optional):
+
+```bash
+pip install -r erc_autonomy/requirements_sam2.txt
+scripts/setup_sam2.sh --variant sam2.1_hiera_large
+python -m erc_autonomy.check_sam2 --probe-load
+python -m erc_autonomy.run_gps --traversability-backend sam2
+```
+
+5. Indoor run:
+
+```bash
+python indoor_nav/run_indoor.py \
+  --goals indoor_nav/goals/ \
+  --policy vlm_hybrid \
+  --match-method dinov2_vlad \
+  --url http://127.0.0.1:8000
+```
