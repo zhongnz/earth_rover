@@ -147,6 +147,35 @@ Interventions:
 - `POST /interventions/end`
 - `GET /interventions/history`
 
+### 4.4 Explicit Interface Invariants
+
+To remove ambiguity, the following are hard interface rules in current implementation:
+
+1. Command domain:
+- `POST /control` expects `command.linear` and `command.angular` in `[-1.0, 1.0]`.
+- SDK clients clamp values to this range before sending.
+
+2. Frame payload format:
+- `GET /v2/front`, `GET /v2/rear`, `GET /v2/screenshot` return raw base64 image payloads (no `data:image/...` prefix in JSON fields).
+- `timestamp` fields in these endpoints are Unix epoch seconds (float).
+
+3. Telemetry availability contract:
+- `GET /data` returns `503` when telemetry is unavailable (`browser_service.data() is None`).
+- Telemetry key presence/units are SDK-defined; consumers must handle missing keys defensively.
+
+4. Mission guard behavior:
+- When `MISSION_SLUG` is set, mission-guarded endpoints require successful mission start; otherwise request fails.
+- `POST /checkpoint-reached` and intervention start/end return `503` if current telemetry does not provide usable lat/lon.
+
+5. Rear camera semantics:
+- Rear frames are not guaranteed for all bot types.
+- `GET /v2/rear` returns `404` when no rear frame is available.
+- `GET /v2/screenshot` includes rear only when bot type is `zero`.
+
+6. Failure propagation:
+- Bridge runtime failures (browser launch/join/eval failures) can surface as endpoint exceptions unless explicitly normalized.
+- Cloud API transport failures in mission/intervention paths are normalized to error responses (`502` class behavior in hardened paths).
+
 ## 5. FastAPI Bridge Technical Specification (`main.py`)
 
 ### 5.1 Responsibilities
@@ -623,6 +652,84 @@ Frames are stored as variable-length encoded bytes to preserve codec format and 
 - `SAM2_STABILITY_SCORE_THRESH`
 - `SAM2_MIN_MASK_REGION_AREA`
 
+### 12.4 Configuration Precedence and Parsing Rules
+
+The project uses multiple config entry points. Precedence is explicit:
+
+1. `main.py` / `browser_service.py` runtime:
+- Environment-driven.
+- `.env` is loaded via `python-dotenv` with non-overriding behavior (`override=False`), so already-exported shell vars win over `.env` file values.
+
+2. `erc_autonomy.run_gps`:
+- `.env` is loaded first (`override=False`).
+- CLI args are parsed next.
+- For SAM2 fields, precedence is:
+  - CLI flag value
+  - environment variable (`SAM2_*`)
+  - built-in default
+- For non-SAM2 GPS fields, precedence is:
+  - CLI flag value
+  - built-in default
+- Invalid numeric env values for SAM2 fields are parsed defensively and fall back to built-in defaults.
+
+3. `indoor_nav.run_indoor.py`:
+- Configuration is CLI-first (no implicit `.env` config layer in this entry point).
+- If `--vlm-endpoint` is empty, `vlm_hybrid` policy runs reactive control without remote VLM queries.
+
+### 12.5 Optional Feature Activation Rules (Explicit)
+
+Optional capabilities are enabled only under these conditions:
+
+1. GPS motion output:
+- Disabled by default.
+- Enabled only when `--enable-motion` is passed to `erc_autonomy.run_gps`.
+
+2. GPS SAM2 traversability backend:
+- Selected only when `--traversability-backend sam2` is set.
+- Requires readable `SAM2_MODEL_CFG` and `SAM2_CHECKPOINT` plus importable SAM2 runtime.
+- If any SAM2 precondition fails at init or inference, runtime falls back to `simple_edge` backend.
+
+3. Indoor DINOv3-VLAD:
+- Used only when `--match-method dinov3_vlad` is selected.
+- Requires model availability/access through the configured Transformers path.
+- Not the default matcher; default remains `dinov2_vlad`.
+
+4. Indoor OpenVLA backend:
+- Selected when policy backend is `vla` and VLA backend resolves to OpenVLA.
+- If model load fails, policy falls back to heuristic-plus behavior.
+
+5. Indoor VLM calls:
+- `vlm_hybrid` performs remote VLM API calls only when `vlm_endpoint` is configured.
+- Without endpoint, control remains local/reactive and no remote reasoning call is attempted.
+
+### 12.6 Bot-Type Compatibility Matrix
+
+| Capability | Mini bot | Zero bot | Notes |
+|---|---|---|---|
+| `GET /v2/front` | supported | supported | Primary camera stream |
+| `GET /v2/rear` | typically unavailable (`404` when missing) | supported when stream exists | Runtime returns `404` if frame absent |
+| `GET /v2/screenshot` rear field | omitted | included | Rear frame inclusion is bot-type gated (`zero`) |
+| GPS autonomy (`erc_autonomy`) | supported | supported | Uses front frame + telemetry |
+| Indoor autonomy (`indoor_nav`) | supported | supported | Rear use is optional/configured |
+
+### 12.7 Security and Trust Boundaries (Current State)
+
+1. Trust boundary:
+- Autonomy modules trust the local bridge (`main.py`) as source of truth for telemetry/frames/control.
+- Bridge trusts SDK browser runtime JS state (`window.rtm_data`, frame helpers).
+
+2. Credentials:
+- SDK tokens are expected via env variables; they are not persisted by this codebase.
+- Operators are responsible for secure local env handling.
+
+3. CORS posture:
+- CORS is permissive (`*`) for current local-dev workflows.
+- This is not a hardened production posture.
+
+4. External dependencies:
+- Mission/intervention APIs depend on external FrodoBots cloud availability.
+- Media/signaling path depends on Agora runtime in SDK UI session.
+
 ## 13. Dependency and Tooling Specification
 
 Base runtime (`requirements.txt`):
@@ -665,6 +772,8 @@ The tooling matrix below gives the implementation-level answer for each major to
 | Matplotlib | Plotting/analysis | `examples/utils/analyze_log.py` | Produces telemetry/path/control plots from HDF5 logs | Fast tuning loop from recorded runs to parameter updates | https://matplotlib.org/stable/ |
 | PyTorch | Deep learning runtime | `indoor_nav/policies/*`, `indoor_nav/modules/checkpoint_manager.py`, optional SAM2 path | Loads and runs model inference for VPR/VLM/VLA/depth components | De facto runtime for modern model ecosystems used by this stack | https://pytorch.org/docs/stable/ |
 | Transformers | Model loading/inference interfaces | `indoor_nav/modules/checkpoint_manager.py`, `indoor_nav/policies/*`, obstacle models | Uses pretrained HF models for feature extraction and policy backends | Unifies model integration and reduces custom model plumbing | https://huggingface.co/docs/transformers/index |
+| DINOv2-VLAD | Visual place-recognition matcher (indoor goal matching baseline) | `indoor_nav/modules/checkpoint_manager.py`, `indoor_nav/configs/config.py`, `indoor_nav/run_indoor.py` | Extracts DINOv2 patch tokens and aggregates with VLAD for goal-image similarity scoring | Strong recall/robustness baseline for image-goal checkpointing | https://arxiv.org/abs/2304.07193 , https://arxiv.org/abs/2308.00688 , https://arxiv.org/abs/2309.16588 |
+| DINOv3-VLAD | Optional visual place-recognition matcher (A/B toggle) | `indoor_nav/modules/checkpoint_manager.py`, `indoor_nav/configs/config.py`, `indoor_nav/eval_match_ab.py`, `indoor_nav/run_indoor.py` | Uses DINOv3 features with the same VLAD pipeline and is evaluated against DINOv2-VLAD via `eval_match_ab.py` | Controlled upgrade path: benchmark newer representation before changing defaults | https://arxiv.org/abs/2508.10104 |
 | SAM2 | Foundation segmentation model (optional traversability backend) | `erc_autonomy/traversability.py`, `scripts/setup_sam2.sh`, `erc_autonomy/check_sam2.py`, `erc_autonomy/bench_traversability.py` | Builds automatic mask generator from pinned config/checkpoint and converts masks to traversability | Higher-capability optional backend with explicit fallback to baseline when unavailable | https://github.com/facebookresearch/sam2 , https://arxiv.org/abs/2408.00714 |
 | pycocotools | COCO mask utilities | `erc_autonomy/traversability.py` | Decodes compressed RLE masks returned by some SAM2 builds | Keeps compatibility across SAM2 output formats | https://github.com/cocodataset/cocoapi |
 | GitHub Actions | CI automation | `.github/workflows/ci.yml` | Runs compile, fallback unit test, and CLI smoke checks on push/PR | Early regression detection for critical runtime paths | https://docs.github.com/actions |
