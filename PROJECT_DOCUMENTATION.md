@@ -1,194 +1,185 @@
 # NYU Earth Rover Project Documentation
 
-## 1) Project Purpose
+This document is the canonical technical briefing for teammates working in this repository.
+It consolidates architecture, tools, design rationale, and research references used in the codebase.
 
-This repository is an Earth Rover software stack for:
+## 1) Project Overview
+
+This repository implements an end-to-end Earth Rover software stack for:
 
 - Remote robot operation through the FrodoBots SDK pattern.
-- Data collection and replay workflows for robotics experiments.
-- Autonomous navigation development for competition tracks:
-  - GPS/checkpoint-based urban autonomy (`erc_autonomy`).
-  - Image-goal indoor autonomy (`indoor_nav`).
+- Data collection, replay, and offline analysis.
+- Competition-oriented autonomous navigation in two modes:
+  - GPS/checkpoint missions (`erc_autonomy`).
+  - Indoor image-goal missions (`indoor_nav`).
 
-The codebase is built around a local FastAPI bridge that talks to FrodoBots cloud APIs and browser-based video/RTM streams, then exposes a stable local HTTP interface for control, telemetry, and camera frames.
+At the center of the system is a local FastAPI bridge that standardizes robot control and sensing as HTTP endpoints for all higher-level modules.
 
-## 2) Repository Layout
+## 2) Repository Structure
 
-Top-level structure:
+Top-level components:
 
-- `main.py`: FastAPI server exposing SDK-compatible endpoints.
-- `browser_service.py`: Playwright-based browser automation for stream join, frame extraction, and message sending.
-- `rtm_client.py`: Legacy direct Agora RTM sender.
-- `README.md`: Primary SDK and baseline usage documentation.
-- `examples/`: Teleop, logging, replay, and utility scripts.
-- `erc_autonomy/`: GPS mission autonomy scaffold (Week 1-6 implementation).
-- `indoor_nav/`: Indoor image-goal autonomy agent and modules.
-- `static/`, `index.html`: Browser UI and SDK web assets.
-- `assets/`, `screenshots/`, `logs/`: media and runtime outputs.
-- `Dockerfile`, `docker-compose.yml`: containerized deployment.
+- `main.py`: FastAPI SDK bridge, mission APIs, intervention APIs, and local UI routes.
+- `browser_service.py`: Playwright runtime adapter for stream join, telemetry reads, frame extraction, and control message injection.
+- `rtm_client.py`: legacy direct RTM sender.
+- `examples/`: teleop, logging, replay, and analysis tools.
+- `erc_autonomy/`: modular GPS autonomy stack for mission checkpoints.
+- `indoor_nav/`: image-goal autonomy stack with VPR/VLM/policy backends.
+- `static/`, `index.html`: web runtime assets used by the SDK bridge.
+- `Dockerfile`, `docker-compose.yml`: containerized runtime.
 
-## 3) High-Level Architecture
+## 3) System Architecture
 
-Runtime data/control flow:
+### 3.1 Data and Control Path
 
-1. Local client code (scripts or autonomy modules) calls local HTTP endpoints at `http://127.0.0.1:8000`.
-2. `main.py` handles endpoint routing and mission state checks.
-3. `browser_service.py` drives a browser session to `/sdk`, joins the stream, reads `window.rtm_data`, captures frame buffers, and sends control messages into the web app runtime.
-4. `main.py` bridges mission/checkpoint/intervention calls to FrodoBots cloud APIs.
-5. Autonomy modules consume `/data` + `/v2/*` and send `/control`.
+1. A client (script, autonomy runner, or external app) calls local SDK endpoints at `http://127.0.0.1:8000`.
+2. `main.py` validates mission state and routes requests.
+3. `browser_service.py` drives a browser session to `/sdk`, joins the stream, and reads:
+   - telemetry from `window.rtm_data`
+   - base64 camera frames via JS helper functions
+4. `main.py` proxies mission/checkpoint/intervention calls to FrodoBots cloud APIs.
+5. Autonomy modules consume local endpoints (`/data`, `/v2/front`, `/v2/screenshot`) and send commands to `/control`.
 
-Key design consequence:
+### 3.2 Core Design Decision
 
-- If browser stream data is unavailable, `/data` and `/v2/*` may be empty or return unavailable-frame errors even while the server process itself is up.
+The autonomy layers never talk directly to the cloud/video stack. They only use local HTTP contracts. This keeps policy code isolated from stream/browser details and supports faster iteration.
 
 ## 4) Core Subsystems
 
-### 4.1 FastAPI SDK Bridge
-
-Primary file: `main.py`.
-
-Main responsibilities:
-
-- Authentication/token acquisition from env vars or FrodoBots API.
-- Mission lifecycle control:
-  - `/start-mission`
-  - `/end-mission`
-  - `/checkpoints-list`
-  - `/checkpoint-reached`
-  - `/missions-history`
-- Intervention lifecycle:
-  - `/interventions/start`
-  - `/interventions/end`
-  - `/interventions/history`
-- Robot I/O endpoints:
-  - `/control`
-  - `/data`
-  - `/screenshot`
-  - `/v2/screenshot`
-  - `/v2/front`
-  - `/v2/rear`
-- Serving web UI:
-  - `/` (spectator)
-  - `/sdk` (controller)
-
-### 4.2 Browser Runtime Adapter
-
-Primary file: `browser_service.py`.
+### 4.1 FastAPI SDK Bridge (`main.py`)
 
 Responsibilities:
 
-- Starts Playwright WebKit browser.
-- Navigates to local `/sdk` page.
-- Clicks join flow and waits for video elements.
-- Reads:
-  - `window.rtm_data` for telemetry.
-  - front/rear base64 frame helpers for camera output.
-- Sends control messages through page JavaScript (`window.sendMessage`).
+- Token/auth lifecycle (`/start-mission`, `/end-mission` and SDK token retrieval).
+- Mission checkpoint APIs (`/checkpoints-list`, `/checkpoint-reached`, `/missions-history`).
+- Intervention APIs (`/interventions/start`, `/interventions/end`, `/interventions/history`).
+- Robot control and sensing (`/control`, `/data`, `/v2/front`, `/v2/rear`, `/v2/screenshot`).
+- UI hosting (`/`, `/sdk`).
 
-Important behavior:
+Runtime hardening in current implementation:
 
-- First telemetry/frame request may trigger browser init.
-- If stream join fails, endpoints may return `null` or "frame not available".
+- External HTTP calls are executed off the event loop (`asyncio.to_thread`) to avoid blocking async request handling.
+- Telemetry-null safeguards return clear HTTP errors (e.g., `503`) instead of internal crashes when stream data is temporarily unavailable.
 
-### 4.3 Baseline Tooling and Data Pipeline
+### 4.2 Browser Runtime Adapter (`browser_service.py`)
 
-Primary files: `examples/` and `examples/utils/`.
+Responsibilities:
 
-Capabilities:
+- Launches Playwright browser engine and joins the SDK UI stream.
+- Configures image quality/format for frame extraction.
+- Reads live telemetry and front/rear frames.
+- Sends control commands into `window.sendMessage(...)`.
 
-- `examples/exploration.py`: keyboard driving + background logging.
-- `examples/navigation.py`: image-match target and replay logged controls.
-- `examples/utils/data_logger.py`: HDF5 recorder for telemetry, IMU, RPMs, controls, and frames.
-- `examples/utils/analyze_log.py`: offline plotting and quick diagnostics.
-- `examples/utils/export_images.py`: frame extraction from HDF5 logs.
-- `examples/utils/image_match.py`: ORB/SIFT matching against logged frames.
-- `examples/utils/extract_controls.py`: control extraction up to target frame index.
-- `examples/utils/keyboard_control.py`: standalone keyboard teleop loop.
+Configurable runtime options:
 
-### 4.4 GPS Autonomy Stack (`erc_autonomy`)
+- `BROWSER_ENGINE` (`webkit`, `chromium`, `firefox`)
+- `BROWSER_HEADLESS` (`true`/`false`)
+- `SDK_BASE_URL` (defaults to `http://127.0.0.1:8000`)
+- `CHROME_EXECUTABLE_PATH` (used only for Chromium mode)
 
-Entry point:
+### 4.3 Baseline Tooling (`examples/`)
 
-- `python -m erc_autonomy.run_gps ...`
+Primary capabilities:
 
-Design:
+- `exploration.py`: keyboard drive plus logging.
+- `navigation.py`: target-image match plus logged-control replay.
+- `utils/data_logger.py`: HDF5 logging for telemetry, controls, IMU, RPM, and frames.
+- `utils/analyze_log.py`: offline plots and quick diagnostics.
+- `utils/export_images.py`: frame export from HDF5.
+- `utils/image_match.py`: ORB/SIFT retrieval utilities.
+- `utils/extract_controls.py`: control extraction by timestamp/frame index.
 
-- Async mission loop with watchdog, state estimation, traversability, BEV projection, path-fusion planning, checkpoint logic, and explicit recovery.
+## 5) Autonomy Stacks
 
-Main modules:
-
-- `config.py`: centralized runtime parameters.
-- `sdk_io.py`: robust async SDK I/O wrapper.
-- `mission_fsm.py`: lifecycle state machine.
-- `watchdog.py`: stale-sensor emergency-stop trigger.
-- `state_estimator.py`: lightweight filtered local pose from GPS/heading/speed.
-- `traversability.py`: simple-edge traversability backend with SAM2 placeholder path.
-- `bev_mapper.py`: local BEV approximation from image-space traversability.
-- `planner.py`: arc rollout sampling + top-k path fusion.
-- `goal_manager.py`: checkpoint parsing, bearing/turn hint generation.
-- `recovery.py`: stuck detection and staged backtrack/rotate/pause recovery.
-- `mission_runner.py`: orchestrator integrating all components.
-- `logging_utils.py`: line-delimited JSON logging format.
-
-Recent control features:
-
-- Checkpoint-distance linear speed taper.
-- Failed-checkpoint feedback taper using proximate distance.
-- Independent angular taper near checkpoints and after failed reports.
-
-### 4.5 Indoor Image-Goal Autonomy (`indoor_nav`)
+### 5.1 GPS Autonomy (`erc_autonomy`)
 
 Entry point:
 
-- `python indoor_nav/run_indoor.py ...`
+```bash
+python -m erc_autonomy.run_gps --url http://127.0.0.1:8000
+```
 
-Design:
+Architecture:
 
-- Goal-conditioned loop for indoor checkpoints using image matching, policy inference, obstacle handling, optional topological memory, and recovery.
+- Async IO wrapper (`sdk_io.py`)
+- Mission FSM (`mission_fsm.py`)
+- Stale-sensor watchdog (`watchdog.py`)
+- Filtered state estimator (`state_estimator.py`)
+- Traversability inference (`traversability.py`)
+- BEV mapper (`bev_mapper.py`)
+- Candidate rollout + path fusion planner (`planner.py`)
+- Goal/checkpoint manager (`goal_manager.py`)
+- Recovery manager (`recovery.py`)
+- Orchestrator (`mission_runner.py`)
 
-Main modules:
+Safety and control policy highlights:
 
-- `configs/config.py`: all indoor config dataclasses.
-- `agent.py`: async orchestrator and control loop.
-- `modules/sdk_client.py`: indoor SDK HTTP client.
-- `modules/checkpoint_manager.py`: goal image loading, feature extraction, and similarity tracking.
-- `modules/obstacle_avoidance.py`: depth/edge-based obstacle estimation.
-- `modules/topological_memory.py`: visual graph, loop closure, A* path support.
-- `modules/recovery.py`: stuck-recovery behavior manager.
-- `policies/base_policy.py`: policy interface and I/O structures.
-- `policies/nomad_policy.py`: NoMaD/heuristic policy wrapper.
-- `policies/vlm_hybrid_policy.py`: VLM-guided high-level policy + reactive control.
-- `policies/vla_policy.py`: VLA-style policy + heuristic fallback.
-- `test_integration.py`: import/config/module and optional SDK sanity checks.
+- Motion disabled by default (`--enable-motion` required).
+- Watchdog-triggered safe-stop on stale sensing.
+- Checkpoint-aware speed taper and angular taper.
+- Failure-aware slowdown after rejected `/checkpoint-reached` attempts.
 
-## 5) API Surface (Local Server)
+Current limitation:
 
-Main endpoint groups:
+- `sam2` traversability backend is a placeholder interface and currently falls back to the built-in `simple_edge` backend.
 
-- Control and telemetry:
-  - `POST /control`
-  - `GET /data`
-  - `GET /screenshot`
-  - `GET /v2/screenshot`
-  - `GET /v2/front`
-  - `GET /v2/rear`
-- Mission:
-  - `POST /start-mission`
-  - `POST|GET /checkpoints-list`
-  - `POST /checkpoint-reached`
-  - `POST /end-mission`
-  - `GET /missions-history`
-- Interventions:
-  - `POST /interventions/start`
-  - `POST /interventions/end`
-  - `GET /interventions/history`
-- UI:
-  - `GET /`
-  - `GET /sdk`
-  - `GET /docs`
-  - `GET /openapi.json`
+### 5.2 Indoor Image-Goal Autonomy (`indoor_nav`)
 
-Control payload shape:
+Entry point:
+
+```bash
+python indoor_nav/run_indoor.py --goals indoor_nav/goals/ --policy vlm_hybrid
+```
+
+Architecture:
+
+- Async orchestrator (`agent.py`) at ~10 Hz.
+- SDK client (`modules/sdk_client.py`).
+- Goal matcher (`modules/checkpoint_manager.py`):
+  - `dinov2_vlad` (default)
+  - `dinov3_vlad` (A/B toggle)
+  - `siglip2`, `dinov2`, `eigenplaces`, `clip`, `sift`
+- Obstacle module (`modules/obstacle_avoidance.py`).
+- Topological memory (`modules/topological_memory.py`).
+- Recovery manager (`modules/recovery.py`).
+- Policy backends (`policies/`):
+  - `vlm_hybrid`
+  - `vla`
+  - `nomad` / `vint`
+  - `heuristic`
+
+## 6) API Surface (Local SDK)
+
+Control/sensing:
+
+- `POST /control`
+- `GET /data`
+- `GET /v2/front`
+- `GET /v2/rear`
+- `GET /v2/screenshot`
+
+Mission:
+
+- `POST /start-mission`
+- `GET|POST /checkpoints-list`
+- `POST /checkpoint-reached`
+- `POST /end-mission`
+- `GET /missions-history`
+
+Interventions:
+
+- `POST /interventions/start`
+- `POST /interventions/end`
+- `GET /interventions/history`
+
+UI/spec:
+
+- `GET /`
+- `GET /sdk`
+- `GET /docs`
+- `GET /openapi.json`
+
+Control payload:
 
 ```json
 {
@@ -200,201 +191,125 @@ Control payload shape:
 }
 ```
 
-## 6) Configuration
+## 7) Configuration and Environment
 
-### 6.1 Environment Variables (Server)
+Use `.env.sample` as the source-of-truth template.
 
-Primary variables:
+Core variables:
 
-- `SDK_API_TOKEN`: FrodoBots SDK API token.
-- `BOT_SLUG`: target bot slug.
-- `CHROME_EXECUTABLE_PATH`: browser path when needed.
-- `MAP_ZOOM_LEVEL`: map zoom for UI.
-- `MISSION_SLUG`: mission identifier for mission mode.
-- `IMAGE_QUALITY`: frame compression quality.
-- `IMAGE_FORMAT`: `jpeg|png|webp`.
-- `DEBUG`: optional request/response debug logging.
+- `SDK_API_TOKEN`
+- `BOT_SLUG`
+- `MISSION_SLUG` (required for scored mission workflows)
+- `MAP_ZOOM_LEVEL`
+- `IMAGE_QUALITY`
+- `IMAGE_FORMAT`
+- `DEBUG`
 
-Mission behavior:
+Browser runtime variables:
 
-- If `MISSION_SLUG` is set, mission endpoints are enforced and `/start-mission` is required for mission-mode workflows.
-- Without `MISSION_SLUG`, general SDK usage is still possible for control/stream experimentation.
+- `BROWSER_ENGINE`
+- `BROWSER_HEADLESS`
+- `SDK_BASE_URL`
+- `CHROME_EXECUTABLE_PATH` (Chromium-only override)
 
-### 6.2 `erc_autonomy` Runtime Flags
+## 8) Tooling and Dependencies
 
-Notable flags in `erc_autonomy/run_gps.py`:
+Base runtime (`requirements.txt`):
 
-- Core loop/safety: `--loop-hz`, `--request-timeout`, `--stale-ms`.
-- Motion: `--enable-motion`, `--max-linear`, `--max-angular`.
-- Checkpoint control:
-  - `--checkpoint-distance`, `--checkpoint-refresh`
-  - `--checkpoint-slowdown-start`, `--checkpoint-slowdown-hard`
-  - `--checkpoint-slowdown-min-factor`
-  - `--checkpoint-angular-min-factor`
-  - `--checkpoint-failure-effect`
-  - `--checkpoint-failure-buffer`
-  - `--checkpoint-failure-min-factor`
-  - `--checkpoint-failure-angular-min-factor`
-- Recovery: `--no-recovery`, `--recovery-stuck-timeout`.
+- FastAPI, Hypercorn, Pydantic
+- Playwright, python-dotenv
+- requests, aiohttp
+- OpenCV, NumPy
+- pynput, h5py, matplotlib
 
-### 6.3 `indoor_nav` Runtime Flags
+Indoor extras (`indoor_nav/requirements_indoor.txt`):
 
-Notable flags in `indoor_nav/run_indoor.py`:
+- torch, torchvision, transformers
+- Pillow, scipy
+- optional serving/inference integrations documented inline (`vLLM`, `openai`, `ollama`)
 
-- Required goals: `--goals`.
-- Policy backend: `--policy` (`vlm_hybrid`, `vla`, `nomad`, `vint`, `heuristic`).
-- Goal matcher: `--match-method` (`dinov2_vlad`, `siglip2`, `dinov2`, `eigenplaces`, `clip`, `sift`).
-- VLM options: `--vlm-endpoint`, `--vlm-model`, `--vlm-api-key`.
-- Obstacle options: `--obstacle-method`, `--no-obstacle`.
-- Memory/recovery toggles: `--no-topo`, `--no-recovery`.
-- Mission routing: `--mission-slug`.
+## 9) Design Rationale and Tradeoffs
 
-## 7) Setup and Execution
+### 9.1 Why modular instead of single end-to-end policy?
 
-### 7.1 Local Development
+- Better observability and debugging under real network latency/jitter.
+- Easier safety interlocks (watchdog stop, explicit recovery, mission guards).
+- Faster A/B iteration on individual modules (matcher, planner, policy, recovery).
 
-1. Create env:
+### 9.2 Why DINOv2-VLAD default, DINOv3 as toggle?
+
+- `dinov2_vlad` is the most stable baseline in this codebase for indoor VPR thresholds and behavior tuning.
+- `dinov3_vlad` is included for controlled A/B evaluation and future migration.
+
+### 9.3 Why Topological Memory?
+
+- Provides long-horizon structure and backtracking without requiring metric-SLAM robustness in challenging monocular indoor conditions.
+
+### 9.4 Why depth-based obstacle gating?
+
+- Lightweight monocular obstacle cues improve safety and command stability with low implementation overhead.
+
+### 9.5 Why checkpoint tapering in GPS missions?
+
+- Reduces overshoot and repeated failed checkpoint reports by decelerating and moderating turn aggressiveness near checkpoint radius.
+
+## 10) Academic References Used by the Project
+
+Primary reference list is maintained in `indoor_nav/SPECIFICATIONS.md`.
+Core references used to justify architecture and model choices:
+
+1. Oquab et al., **DINOv2**, arXiv:2304.07193 (2023)
+2. Darcet et al., **Vision Transformers Need Registers**, arXiv:2309.16588 (ICLR 2024)
+3. Keetha et al., **AnyLoc**, arXiv:2308.00688 (RA-L 2023)
+4. Tschannen et al., **SigLIP 2**, arXiv:2502.14786 (2025)
+5. Berton et al., **EigenPlaces**, arXiv:2308.10832 (ICCV 2023)
+6. Bai et al., **Qwen2.5-VL**, arXiv:2502.13923 (2025)
+7. Yang et al., **Depth Anything V2**, arXiv:2406.09414 (NeurIPS 2024)
+8. Bochkovskii et al., **Depth Pro**, arXiv:2410.02073 (ICLR 2025)
+9. Sridhar et al., **NoMaD**, arXiv:2310.07896 (ICRA 2024)
+10. Shah et al., **ViNT**, arXiv:2306.14846 (CoRL 2023)
+11. Kim et al., **OpenVLA**, arXiv:2406.09246 (2024)
+12. Chiang et al., **Mobility VLA**, arXiv:2407.07775 (2024)
+13. Open X-Embodiment Collaboration, **Open X-Embodiment**, arXiv:2310.08864 (ICRA 2024)
+
+## 11) Setup, Validation, and Operations
+
+### 11.1 Local Setup
 
 ```bash
 conda create -n erv python=3.11
 conda activate erv
 pip install -r requirements.txt
-```
-
-2. Start server:
-
-```bash
+cp .env.sample .env
 hypercorn main:app --reload
 ```
 
-3. Open UI and join:
+Then open `http://localhost:8000` and click Join.
 
-- `http://localhost:8000` (or `/sdk`) and click Join.
-
-### 7.2 Baseline Examples
-
-Exploration logging:
-
-```bash
-python examples/exploration.py --url http://127.0.0.1:8000 --rate 10 --out logs/run.h5
-```
-
-Navigation replay:
-
-```bash
-python examples/navigation.py logs/run.h5 --target assets/axis.jpg --url http://127.0.0.1:8000
-```
-
-### 7.3 GPS Autonomy
-
-Safe startup (motion disabled by default):
-
-```bash
-python -m erc_autonomy.run_gps --url http://127.0.0.1:8000 --loop-hz 10
-```
-
-Enable motion:
-
-```bash
-python -m erc_autonomy.run_gps --enable-motion --max-linear 0.2 --max-angular 0.35
-```
-
-### 7.4 Indoor Autonomy
-
-Install additional dependencies:
+### 11.2 Optional Indoor Setup
 
 ```bash
 pip install -r indoor_nav/requirements_indoor.txt
+python indoor_nav/test_integration.py --skip-sdk
 ```
 
-Run:
-
-```bash
-python indoor_nav/run_indoor.py --goals indoor_nav/goals/ --policy vlm_hybrid
-```
-
-## 8) Testing and Validation
-
-Baseline checks:
-
-- `python -m compileall -q erc_autonomy`
-- `python -m erc_autonomy.run_gps --help`
-- `python indoor_nav/test_integration.py --skip-sdk`
-
-Live SDK checks:
+### 11.3 Quick Runtime Checks
 
 - `curl http://127.0.0.1:8000/openapi.json`
 - `curl http://127.0.0.1:8000/data`
 - `curl http://127.0.0.1:8000/v2/front`
 - `curl -X POST http://127.0.0.1:8000/control -H 'Content-Type: application/json' -d '{"command":{"linear":0,"angular":0}}'`
 
-## 9) Logging and Artifacts
+## 12) Known Limitations and Next Steps
 
-### 9.1 HDF5 Logs
+Current limitations:
 
-Generated by `examples/utils/data_logger.py` and indoor logging hooks.
+- Stream availability governs endpoint freshness (`/data`, `/v2/*`).
+- GPS traversability backend is currently heuristic-first (`simple_edge`) with `sam2` placeholder interface.
+- Indoor stack requires heavyweight ML dependencies for full policy coverage.
 
-Typical datasets/groups:
+Recommended next steps:
 
-- `telemetry`
-- `accels`
-- `gyros`
-- `mags`
-- `rpms`
-- `controls`
-- `front_frames`
-- `rear_frames`
-
-### 9.2 `erc_autonomy` JSON Logs
-
-Structured fields include:
-
-- Loop state and latency.
-- Traversability and planner outputs.
-- Goal/checkpoint status.
-- Checkpoint speed/angular taper factors.
-- Recovery mode and command outputs.
-
-## 10) Operational Failure Modes and Debugging
-
-Common issues:
-
-- `Missing required environment variables: MISSION_SLUG`:
-  - Mission mode requested, but `MISSION_SLUG` not configured.
-- `Front frame not available` or repeated stale watchdog stops:
-  - Stream/browser join path not initialized or robot stream unavailable.
-- `/data` returns `null`:
-  - No active telemetry payload in browser runtime.
-- `/control` 400 `Command not provided`:
-  - Invalid JSON shape; must include `{"command": {...}}`.
-
-Quick triage sequence:
-
-1. Verify server alive: `GET /`.
-2. Check API schema: `GET /openapi.json`.
-3. Validate stream endpoints: `GET /data`, `GET /v2/front`.
-4. Send explicit zero command with valid payload shape.
-5. Confirm mission env configuration if running mission APIs.
-
-## 11) Extension Guide
-
-Recommended extension points:
-
-- New traversability backend:
-  - Implement in `erc_autonomy/traversability.py`.
-  - Keep output as `TraversabilityResult`.
-- New local planner:
-  - Extend or replace `PathFusionPlanner` in `erc_autonomy/planner.py`.
-- Better state estimation:
-  - Replace internal filter in `erc_autonomy/state_estimator.py` with EKF/UKF while preserving `StateEstimate`.
-- Advanced indoor policies:
-  - Add new policy class implementing `BasePolicy` in `indoor_nav/policies/`.
-- Improved indoor place recognition:
-  - Extend `GoalMatcher` backends in `indoor_nav/modules/checkpoint_manager.py`.
-
-## 12) Project Status Summary
-
-- SDK server and baseline tooling are production-usable for teleop, logging, and replay.
-- `erc_autonomy` provides a complete modular autonomy scaffold with safety and checkpoint behaviors.
-- `indoor_nav` provides a rich modular framework for image-goal indoor autonomy with multiple policy backends.
-- Real-world performance is constrained by live stream availability, mission configuration, and external API conditions.
+- Integrate a real SAM2 traversability backend in `erc_autonomy/traversability.py`.
+- Expand formal tests for mission/intervention edge cases and stream loss.
+- Continue DINOv2-vs-DINOv3 A/B evaluation on indoor goals before changing defaults.
