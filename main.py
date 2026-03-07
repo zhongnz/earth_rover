@@ -481,8 +481,19 @@ async def get_data():
     await need_start_mission()
     data = await browser_service.data()
     if data is None:
-        raise HTTPException(status_code=503, detail="Telemetry not available")
+        status = await browser_service.status()
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "Telemetry not available", "sdk_status": status},
+        )
     return JSONResponse(content=data)
+
+
+@app.get("/sdk-status")
+async def get_sdk_status():
+    await need_start_mission()
+    status = await browser_service.status()
+    return JSONResponse(content=status)
 
 
 @app.post("/checkpoint-reached")
@@ -639,7 +650,11 @@ async def get_front_frame():
         response_data["timestamp"] = datetime.utcnow().timestamp()
         return JSONResponse(content=response_data)
     else:
-        raise HTTPException(status_code=404, detail="Front frame not available")
+        status = await browser_service.status()
+        raise HTTPException(
+            status_code=404,
+            detail={"error": "Front frame not available", "sdk_status": status},
+        )
 
 
 @app.get("/v2/rear")
@@ -656,7 +671,11 @@ async def get_rear_frame():
         response_data["timestamp"] = datetime.utcnow().timestamp()
         return JSONResponse(content=response_data)
     else:
-        raise HTTPException(status_code=404, detail="Rear frame not available")
+        status = await browser_service.status()
+        raise HTTPException(
+            status_code=404,
+            detail={"error": "Rear frame not available", "sdk_status": status},
+        )
 
 
 @app.post("/interventions/start")

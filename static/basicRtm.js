@@ -4,6 +4,15 @@ $(document).ready(function () {
   const TOKEN = $("#rtm_token").val();
   const channelName = $("#channel").val(); // Replace with your desired channel name
   const botUid = $("#bot_uid").val();
+  window.rtm_data = window.rtm_data || null;
+  window.sendMessage = function sendMessageUnavailable(json) {
+    console.warn("RTM unavailable; cannot send message:", json);
+  };
+
+  if (!APP_ID || !USER_ID || !TOKEN || !channelName) {
+    console.log("RTM disabled: missing APP_ID, USER_ID, TOKEN, or channel name.");
+    return;
+  }
 
   // Create an instance of the Agora RTM client
   const rtmClient = AgoraRTM.createInstance(APP_ID);
@@ -103,4 +112,3 @@ $(document).ready(function () {
   // Call joinRTMChannel with the user ID to start the process
   joinRTMChannel(USER_ID);
 });
-

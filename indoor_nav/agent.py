@@ -122,6 +122,10 @@ class IndoorNavigationAgent:
             from indoor_nav.policies.nomad_policy import NoMaDPolicy
             return NoMaDPolicy(self.cfg.policy)
 
+        elif backend == "gnm":
+            from indoor_nav.policies.nomad_policy import NoMaDPolicy
+            return NoMaDPolicy(self.cfg.policy)
+
         elif backend == "vlm_hybrid":
             from indoor_nav.policies.vlm_hybrid_policy import VLMHybridPolicy
             return VLMHybridPolicy(self.cfg.policy)

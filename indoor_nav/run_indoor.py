@@ -34,6 +34,24 @@ Usage:
   python indoor_nav/run_indoor.py --goals indoor_nav/goals/ --policy nomad \\
       --match-method dinov2
 
+  # ViNT with official visualnav-transformer checkpoint:
+  python indoor_nav/run_indoor.py --goals indoor_nav/goals/ --policy vint \\
+      --model-path /path/to/vint.pth \\
+      --nomad-repo-root /path/to/visualnav-transformer \\
+      --match-method sift --obstacle-method simple_edge
+
+  # GNM with official visualnav-transformer checkpoint:
+  python indoor_nav/run_indoor.py --goals indoor_nav/goals/ --policy gnm \\
+      --model-path /path/to/gnm_large.pth \\
+      --nomad-repo-root /path/to/visualnav-transformer \\
+      --match-method sift --obstacle-method simple_edge
+
+  # NoMaD with an official visualnav-transformer checkpoint:
+  python indoor_nav/run_indoor.py --goals indoor_nav/goals/ --policy nomad \\
+      --model-path /path/to/nomad.pth \\
+      --nomad-repo-root /path/to/visualnav-transformer \\
+      --match-method sift --obstacle-method simple_edge
+
   # Full competition run with mission:
   python indoor_nav/run_indoor.py --goals indoor_nav/goals/ --policy vlm_hybrid \\
       --url http://127.0.0.1:8000 --mission-slug indoor-mission-1 \\
@@ -53,7 +71,7 @@ import sys
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 
-from indoor_nav.configs.config import IndoorNavConfig
+from indoor_nav.cli_common import add_common_args, build_config
 from indoor_nav.agent import IndoorNavigationAgent
 
 
@@ -63,135 +81,8 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-
-    # Required
-    p.add_argument(
-        "--goals",
-        nargs="+",
-        required=True,
-        help="Goal image files or a single directory containing them (in order)",
-    )
-
-    # SDK
-    p.add_argument("--url", default="http://127.0.0.1:8000", help="SDK base URL")
-    p.add_argument("--mission-slug", default="", help="Mission slug (if running a scored mission)")
-
-    # Policy
-    p.add_argument(
-        "--policy",
-        choices=["nomad", "vint", "vlm_hybrid", "vla", "heuristic"],
-        default="vlm_hybrid",
-        help="Navigation policy backend (default: vlm_hybrid)",
-    )
-    p.add_argument("--model-path", default="", help="Path to policy model weights")
-    p.add_argument("--device", default="cuda", help="Compute device (cuda/cpu)")
-
-    # VLM options (SOTA: Qwen2.5-VL 7B)
-    p.add_argument("--vlm-endpoint", default="", help="VLM API endpoint (e.g., http://localhost:8000/v1)")
-    p.add_argument("--vlm-model", default="Qwen/Qwen2.5-VL-7B-Instruct", help="VLM model name")
-    p.add_argument("--vlm-api-key", default="", help="API key for VLM endpoint")
-
-    # Goal matching (SOTA: DINOv2-VLAD / DINOv3-VLAD)
-    p.add_argument(
-        "--match-method",
-        choices=["dinov2_vlad", "dinov3_vlad", "siglip2", "dinov2", "eigenplaces", "clip", "sift"],
-        default="dinov2_vlad",
-        help="Image goal matching method (default: dinov2_vlad)",
-    )
-    p.add_argument("--match-threshold", type=float, default=0.78, help="Similarity threshold for arrival")
-
-    # Control
-    p.add_argument("--max-speed", type=float, default=0.6, help="Max linear speed [0-1]")
-    p.add_argument("--loop-hz", type=float, default=10.0, help="Control loop frequency")
-
-    # Obstacle avoidance
-    p.add_argument("--no-obstacle", action="store_true", help="Disable obstacle avoidance")
-    p.add_argument(
-        "--obstacle-method",
-        choices=["depth_anything", "depth_pro", "simple_edge"],
-        default="depth_anything",
-        help="Obstacle detection method",
-    )
-
-    # Topological memory
-    p.add_argument("--no-topo", action="store_true", help="Disable topological memory")
-    p.add_argument("--topo-max-nodes", type=int, default=500, help="Max topo graph nodes")
-
-    # Recovery
-    p.add_argument("--no-recovery", action="store_true", help="Disable recovery behaviors")
-
-    # Logging
-    p.add_argument("--no-log", action="store_true", help="Disable HDF5 logging")
-    p.add_argument("--log-dir", default="indoor_nav/logs", help="Log output directory")
-
-    # Debug
-    p.add_argument("--verbose", "-v", action="store_true", help="Verbose logging")
-
+    add_common_args(p)
     return p.parse_args()
-
-
-def build_config(args: argparse.Namespace) -> IndoorNavConfig:
-    """Build IndoorNavConfig from CLI arguments."""
-    cfg = IndoorNavConfig()
-
-    # SDK
-    cfg.sdk.base_url = args.url
-    cfg.mission_slug = args.mission_slug
-
-    # Policy
-    cfg.policy.backend = args.policy
-    cfg.policy.device = args.device
-    if args.model_path:
-        cfg.policy.model_path = args.model_path
-    if args.vlm_endpoint:
-        cfg.policy.vlm_endpoint = args.vlm_endpoint
-    cfg.policy.vlm_model = args.vlm_model
-    if args.vlm_api_key:
-        cfg.policy.vlm_api_key = args.vlm_api_key
-
-    # Goal matching
-    cfg.goal.match_method = args.match_method
-    cfg.goal.match_threshold = args.match_threshold
-    cfg.goal.feature_device = args.device
-
-    # Auto-select feature model based on match method
-    if args.match_method == "siglip2":
-        cfg.goal.feature_model = "google/siglip2-base-patch16-224"
-    elif args.match_method == "dinov2_vlad":
-        # Use registers variant for cleaner patch features (Darcet et al., 2024)
-        cfg.goal.feature_model = "facebook/dinov2-with-registers-base"
-    elif args.match_method == "dinov3_vlad":
-        # DINOv3 ViT-B/16 with LVD-1689M pretrain (released Aug 2025).
-        cfg.goal.feature_model = "facebook/dinov3-vitb16-pretrain-lvd1689m"
-    elif args.match_method == "dinov2":
-        cfg.goal.feature_model = "facebook/dinov2-base"
-
-    # Control
-    cfg.control.max_linear = args.max_speed
-    cfg.control.max_angular = args.max_speed
-    cfg.control.loop_hz = args.loop_hz
-
-    # Obstacle avoidance
-    cfg.obstacle.enabled = not args.no_obstacle
-    cfg.obstacle.method = args.obstacle_method
-    cfg.obstacle.depth_device = args.device
-    if args.obstacle_method == "depth_pro":
-        cfg.obstacle.depth_model = "apple/DepthPro"
-    elif args.obstacle_method == "depth_anything":
-        cfg.obstacle.depth_model = "depth-anything/Depth-Anything-V2-Base-hf"
-
-    # Topological memory
-    cfg.topo_memory.enabled = not args.no_topo
-    cfg.topo_memory.max_nodes = args.topo_max_nodes
-
-    # Recovery
-    cfg.recovery.enabled = not args.no_recovery
-
-    # Logging
-    cfg.log.enabled = not args.no_log
-    cfg.log.log_dir = args.log_dir
-
-    return cfg
 
 
 async def main():

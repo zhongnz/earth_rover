@@ -36,7 +36,9 @@ transformers>=4.44.0          # DINOv2, SigLIP2, Depth Anything V2, OpenVLA
 # Octo:    pip install octo-model  (Berkeley's lightweight policy)
 
 # --- Optional: NoMaD / ViNT ---
-# diffusers>=0.28.0            # for NoMaD diffusion policy
+# diffusers>=0.28.0            # scheduler for official NoMaD checkpoints
+# efficientnet-pytorch         # official NoMaD ViNT encoder dependency
+# warmup-scheduler             # needed to deserialize some official ViNT checkpoints
 # einops                       # used by ViNT/NoMaD models
 
 # --- Optional: SuperGlue matching ---

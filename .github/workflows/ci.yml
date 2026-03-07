@@ -36,3 +36,4 @@ jobs:
           python -m erc_autonomy.run_gps --help > /dev/null
           python -m erc_autonomy.bench_traversability --help > /dev/null
           python -m erc_autonomy.check_sam2 --help > /dev/null
+          python indoor_nav/check_indoor.py --help > /dev/null

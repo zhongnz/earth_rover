@@ -24,6 +24,154 @@ var localTracks = {
  */
 var remoteUsers = {};
 
+const DEBUG_MODE = false;
+const lastBase64Frames = {};
+const subscribeState = new Map();
+const videoSlots = {
+  frontUid: null,
+  rearUid: null,
+};
+const defaultVideoStatus = {
+  joinedRtc: false,
+  remoteVideoPublished: false,
+  remoteVideoUids: [],
+  frontUid: null,
+  rearUid: null,
+  severity: "secondary",
+  message: "RTC not joined.",
+  lastError: null,
+};
+window.sdkVideoStatus = { ...defaultVideoStatus };
+window.imageParams = {
+  imageFormat: "png",
+  imageQuality: 1.0,
+};
+
+function renderVideoStatus() {
+  const el = document.getElementById("video-status-alert");
+  if (!el) {
+    return;
+  }
+  const status = window.sdkVideoStatus || defaultVideoStatus;
+  el.className = `alert alert-${status.severity || "secondary"} fade show`;
+  el.textContent = status.message || "";
+  el.style.display = status.message ? "block" : "none";
+}
+
+function getErrorText(error) {
+  if (!error) {
+    return "unknown error";
+  }
+  if (typeof error === "string") {
+    return error;
+  }
+  if (error.message) {
+    return error.message;
+  }
+  return String(error);
+}
+
+function isRepeatSubscribeError(error) {
+  const text = getErrorText(error);
+  return (
+    text.includes("Repeat subscribe request") ||
+    text.includes("ERR_SUBSCRIBE_REQUEST_INVALID")
+  );
+}
+
+function getSubscribeKey(uid, mediaType) {
+  return `${Number(uid)}:${String(mediaType)}`;
+}
+
+function clearSubscribeStateForUid(uid) {
+  const normalizedUid = Number(uid);
+  for (const key of subscribeState.keys()) {
+    if (key.startsWith(`${normalizedUid}:`)) {
+      subscribeState.delete(key);
+    }
+  }
+}
+
+function setVideoStatus(patch) {
+  window.sdkVideoStatus = {
+    ...window.sdkVideoStatus,
+    ...patch,
+  };
+  renderVideoStatus();
+}
+
+function getPublishedVideoUids() {
+  return Object.values(remoteUsers)
+    .filter((user) => user && user.videoTrack)
+    .map((user) => Number(user.uid))
+    .filter((uid) => Number.isFinite(uid));
+}
+
+function assignVideoSlot(uid) {
+  const normalizedUid = Number(uid);
+  if (!Number.isFinite(normalizedUid)) {
+    return;
+  }
+  if (normalizedUid === 1000) {
+    videoSlots.frontUid = normalizedUid;
+    return;
+  }
+  if (normalizedUid === 1001) {
+    videoSlots.rearUid = normalizedUid;
+    return;
+  }
+  if (videoSlots.frontUid === null) {
+    videoSlots.frontUid = normalizedUid;
+    return;
+  }
+  if (videoSlots.frontUid !== normalizedUid && videoSlots.rearUid === null) {
+    videoSlots.rearUid = normalizedUid;
+  }
+}
+
+function rebuildVideoSlots() {
+  const publishedUids = getPublishedVideoUids();
+  videoSlots.frontUid = publishedUids.includes(1000) ? 1000 : null;
+  videoSlots.rearUid = publishedUids.includes(1001) ? 1001 : null;
+  publishedUids.forEach((uid) => assignVideoSlot(uid));
+
+  const remoteVideoPublished = publishedUids.length > 0;
+  const message = remoteVideoPublished
+    ? `Receiving remote video from UID${publishedUids.length > 1 ? "s" : ""} ${publishedUids.join(", ")}.`
+    : window.sdkVideoStatus.joinedRtc
+      ? "Joined RTC channel. Waiting for remote video to be published."
+      : "RTC not joined.";
+
+  setVideoStatus({
+    remoteVideoPublished,
+    remoteVideoUids: publishedUids,
+    frontUid: videoSlots.frontUid,
+    rearUid: videoSlots.rearUid,
+    severity: remoteVideoPublished
+      ? "success"
+      : window.sdkVideoStatus.joinedRtc
+        ? "warning"
+        : "secondary",
+    message,
+  });
+}
+
+function scheduleRemoteVideoWarning() {
+  if (window.remoteVideoWaitTimer) {
+    clearTimeout(window.remoteVideoWaitTimer);
+  }
+  window.remoteVideoWaitTimer = window.setTimeout(() => {
+    if (window.sdkVideoStatus.joinedRtc && getPublishedVideoUids().length === 0) {
+      setVideoStatus({
+        remoteVideoPublished: false,
+        remoteVideoUids: [],
+        severity: "warning",
+        message: "Joined RTC channel, but no remote video has been published yet.",
+      });
+    }
+  }, 10000);
+}
+
 /*
  * On initiation. `client` is not attached to any project or channel for any specific user.
  */
@@ -162,6 +310,7 @@ async function changeVideoProfile(label) {
  */
 $(() => {
   initVideoProfiles();
+  renderVideoStatus();
   $(".profile-list").delegate("a", "click", function (e) {
     changeVideoProfile(this.getAttribute("label"));
   });
@@ -196,6 +345,14 @@ $("#join-form").submit(async function (e) {
     options.uid = Number($("#uid").val());
     options.appid = $("#appid").val();
     options.token = $("#token").val();
+    remoteUsers = {};
+    videoSlots.frontUid = null;
+    videoSlots.rearUid = null;
+    setVideoStatus({
+      ...defaultVideoStatus,
+      severity: "info",
+      message: "Joining RTC channel...",
+    });
     await join();
     if (options.token) {
       $("#success-alert-with-token").css("display", "block");
@@ -208,6 +365,13 @@ $("#join-form").submit(async function (e) {
     }
   } catch (error) {
     console.error(error);
+    setVideoStatus({
+      joinedRtc: false,
+      remoteVideoPublished: false,
+      severity: "danger",
+      message: `RTC join failed: ${error}`,
+      lastError: String(error),
+    });
   } finally {
     $("#leave").attr("disabled", false);
   }
@@ -236,12 +400,22 @@ async function join() {
   // Add an event listener to play remote tracks when remote user publishes.
   client.on("user-published", handleUserPublished);
   client.on("user-unpublished", handleUserUnpublished);
+  client.on("user-joined", handleUserJoined);
+  client.on("user-left", handleUserLeft);
+  client.on("user-info-updated", handleUserInfoUpdated);
   options.uid = await client.join(
     options.appid,
     options.channel,
     options.token || null,
     options.uid || null
   );
+  setVideoStatus({
+    joinedRtc: true,
+    severity: "info",
+    message: "Joined RTC channel. Waiting for remote video to be published.",
+    lastError: null,
+  });
+  scheduleRemoteVideoWarning();
   $("#captured-frames").css("display", DEBUG_MODE ? "block" : "none");
 }
 
@@ -260,10 +434,20 @@ async function leave() {
 
   // Remove remote users and player views.
   remoteUsers = {};
+  subscribeState.clear();
   $("#remote-playerlist").html("");
 
   // leave the channel
   await client.leave();
+  if (window.remoteVideoWaitTimer) {
+    clearTimeout(window.remoteVideoWaitTimer);
+  }
+  videoSlots.frontUid = null;
+  videoSlots.rearUid = null;
+  setVideoStatus({
+    ...defaultVideoStatus,
+    message: "Left RTC channel.",
+  });
   $("#local-player-name").text("");
   $("#join").attr("disabled", false);
   $("#leave").attr("disabled", true);
@@ -279,9 +463,43 @@ async function leave() {
  */
 async function subscribe(user, mediaType) {
   const uid = user.uid;
-  await client.subscribe(user, mediaType);
-  console.log("subscribe success");
+  const subscribeKey = getSubscribeKey(uid, mediaType);
+  const existingState = subscribeState.get(subscribeKey);
+
+  if (existingState === "pending" || existingState === "ready") {
+    console.warn(
+      `Skipping duplicate subscribe for user ${uid}, mediaType ${mediaType} (${existingState})`
+    );
+    return;
+  }
+
+  subscribeState.set(subscribeKey, "pending");
+  try {
+    await client.subscribe(user, mediaType);
+    subscribeState.set(subscribeKey, "ready");
+    console.log("subscribe success");
+  } catch (error) {
+    subscribeState.delete(subscribeKey);
+    const errorText = getErrorText(error);
+    console.error(`subscribe failed for user ${uid}, mediaType ${mediaType}`, error);
+    if (mediaType === "video") {
+      setVideoStatus({
+        joinedRtc: true,
+        severity: "danger",
+        message: `Remote user ${uid} published video, but browser subscribe failed: ${errorText}`,
+        lastError: errorText,
+      });
+    }
+    throw error;
+  }
+
   if (mediaType === "video") {
+    if ($(`#player-wrapper-${uid}`).length > 0) {
+      $(`#player-wrapper-${uid}`).remove();
+    }
+    if ($(`#captured-frame-${uid}`).length > 0) {
+      $(`#captured-frame-${uid}`).remove();
+    }
     const playerWidth =
       uid === 1001 ? "540px" : uid === 1000 ? "1024px" : "auto";
     const playerHeight =
@@ -309,6 +527,11 @@ async function subscribe(user, mediaType) {
     $("#captured-frames").append(capturedFrameDiv);
 
     user.videoTrack.captureEnabled = true;
+    assignVideoSlot(uid);
+    rebuildVideoSlots();
+    if (window.remoteVideoWaitTimer) {
+      clearTimeout(window.remoteVideoWaitTimer);
+    }
   }
   if (mediaType === "audio") {
     user.audioTrack.play();
@@ -324,7 +547,61 @@ async function subscribe(user, mediaType) {
 function handleUserPublished(user, mediaType) {
   const id = user.uid;
   remoteUsers[id] = user;
-  subscribe(user, mediaType);
+  if (mediaType === "video") {
+    setVideoStatus({
+      joinedRtc: true,
+      severity: "info",
+      message: `Remote user ${id} published video. Subscribing...`,
+    });
+  }
+  void subscribe(user, mediaType).catch((error) => {
+    if (isRepeatSubscribeError(error)) {
+      console.warn(`Ignoring repeat subscribe response for user ${id}, mediaType ${mediaType}`, error);
+      return;
+    }
+  });
+}
+
+function handleUserJoined(user) {
+  const uid = Number(user.uid);
+  if (!Number.isFinite(uid)) {
+    return;
+  }
+  setVideoStatus({
+    joinedRtc: true,
+    severity: "info",
+    message: `Remote user ${uid} joined. Waiting for video publication.`,
+  });
+}
+
+function handleUserLeft(user) {
+  const uid = Number(user.uid);
+  delete remoteUsers[uid];
+  clearSubscribeStateForUid(uid);
+  rebuildVideoSlots();
+  if (window.sdkVideoStatus.joinedRtc && !window.sdkVideoStatus.remoteVideoPublished) {
+    setVideoStatus({
+      severity: "warning",
+      message: `Remote user ${uid} left before publishing video.`,
+    });
+  }
+}
+
+function handleUserInfoUpdated(uidOrUser, msg) {
+  const uid =
+    typeof uidOrUser === "object" && uidOrUser !== null
+      ? Number(uidOrUser.uid)
+      : Number(uidOrUser);
+  if (!Number.isFinite(uid)) {
+    return;
+  }
+  if (msg === "mute-video" && getPublishedVideoUids().length === 0) {
+    setVideoStatus({
+      joinedRtc: true,
+      severity: "warning",
+      message: `Remote user ${uid} is connected, but video is muted or not published.`,
+    });
+  }
 }
 
 /*
@@ -333,10 +610,13 @@ function handleUserPublished(user, mediaType) {
  * @param  {string} user - The {@link  https://docs.agora.io/en/Voice/API%20Reference/web_ng/interfaces/iagorartcremoteuser.html| remote user} to remove.
  */
 function handleUserUnpublished(user, mediaType) {
+  subscribeState.delete(getSubscribeKey(user.uid, mediaType));
   if (mediaType === "video") {
     const id = user.uid;
     delete remoteUsers[id];
     $(`#player-wrapper-${id}`).remove();
+    $(`#captured-frame-${id}`).remove();
+    rebuildVideoSlots();
   }
 }
 function getCodec() {
@@ -387,10 +667,6 @@ async function captureFrameAsBase64(videoTrack, uid) {
   return null;
 }
 
-// Add at the beginning of the file
-const DEBUG_MODE = false;
-const lastBase64Frames = {};
-
 // Function to get the latest base64 frame for a specific UID
 async function getLastBase64Frame(uid) {
   const user = remoteUsers[uid];
@@ -406,5 +682,33 @@ async function getLastBase64Frame(uid) {
 function initializeImageParams({ imageFormat, imageQuality }) {
   window.imageParams = { imageFormat, imageQuality };
 }
+
+function getRemoteVideoStatus() {
+  return {
+    ...window.sdkVideoStatus,
+    frontUid: videoSlots.frontUid,
+    rearUid: videoSlots.rearUid,
+    remoteVideoUids: getPublishedVideoUids(),
+  };
+}
+
+function getPreferredVideoUid(view) {
+  const status = getRemoteVideoStatus();
+  if (view === "rear") {
+    return status.rearUid;
+  }
+  return status.frontUid;
+}
+
+async function getLastBase64FrameForView(view) {
+  const uid = getPreferredVideoUid(view);
+  if (uid === null || uid === undefined) {
+    return null;
+  }
+  return getLastBase64Frame(uid);
+}
+
 window.initializeImageParams = initializeImageParams;
-window.getLastBase64Frame = getLastBase64Frame
+window.getLastBase64Frame = getLastBase64Frame;
+window.getLastBase64FrameForView = getLastBase64FrameForView;
+window.getRemoteVideoStatus = getRemoteVideoStatus;

@@ -16,7 +16,7 @@ using only onboard cameras and IMU.
 | VLM Reasoning | Qwen2.5-VL 7B | arXiv:2502.13923 |
 | Depth Estimation | Depth Anything V2 Base | NeurIPS 2024, arXiv:2406.09414 |
 | Topological Memory | Visual graph + A* | Inspired by NTS (NeurIPS 2020), Mobility VLA (arXiv:2407.07775) |
-| Navigation Policy | VLM-Hybrid (default), NoMaD, VLA | NoMaD: arXiv:2310.07896, OpenVLA: arXiv:2406.09246 |
+| Navigation Policy | VLM-Hybrid (default), NoMaD, ViNT, GNM, VLA | NoMaD: arXiv:2310.07896, ViNT: arXiv:2306.14846, GNM: ICRA 2023, OpenVLA: arXiv:2406.09246 |
 
 ## Quick Start
 
@@ -28,6 +28,10 @@ pip install -r requirements.txt -r indoor_nav/requirements_indoor.txt
 
 # Start SDK server
 hypercorn main:app --reload
+
+# Preflight before a run
+# First place ordered checkpoint images in indoor_nav/goals/ or pass explicit file paths.
+python indoor_nav/check_indoor.py --goals indoor_nav/goals/
 
 # Run (full SOTA: Qwen2.5-VL + DINOv2-VLAD)
 python indoor_nav/run_indoor.py --goals indoor_nav/goals/ \
@@ -46,6 +50,24 @@ python indoor_nav/eval_match_ab.py \
 # Run (no GPU, heuristic mode)
 python indoor_nav/run_indoor.py --goals indoor_nav/goals/ \
     --policy heuristic --obstacle-method simple_edge --device cpu
+
+# Run NoMaD with an official visualnav-transformer checkpoint (.pth)
+python indoor_nav/run_indoor.py --goals indoor_nav/goals/ \
+    --policy nomad --model-path /path/to/nomad.pth \
+    --nomad-repo-root /path/to/visualnav-transformer \
+    --match-method sift --obstacle-method simple_edge
+
+# Run ViNT with an official visualnav-transformer checkpoint (.pth)
+python indoor_nav/run_indoor.py --goals indoor_nav/goals/ \
+    --policy vint --model-path /path/to/vint.pth \
+    --nomad-repo-root /path/to/visualnav-transformer \
+    --match-method sift --obstacle-method simple_edge
+
+# Run GNM with an official visualnav-transformer checkpoint (.pth)
+python indoor_nav/run_indoor.py --goals indoor_nav/goals/ \
+    --policy gnm --model-path /path/to/gnm_large.pth \
+    --nomad-repo-root /path/to/visualnav-transformer \
+    --match-method sift --obstacle-method simple_edge
 
 # Run tests
 python indoor_nav/test_integration.py --skip-sdk
@@ -86,9 +108,12 @@ indoor_nav/
 │   ├── vla_policy.py           # Vision-Language-Action model
 │   └── nomad_policy.py         # NoMaD diffusion policy
 ├── agent.py                    # Main orchestrator
+├── cli_common.py               # Shared indoor CLI/config builder
+├── check_indoor.py             # Operator preflight for goals, SDK, and backends
 ├── run_indoor.py               # CLI entry point
 ├── eval_match_ab.py            # A/B matcher benchmark script
 ├── eval_queries/               # Optional query set for A/B matching
+├── goals/                      # Placeholder directory for mission-specific goal images
 ├── test_integration.py         # Integration tests
 ├── requirements_indoor.txt     # Dependencies
 ├── SPECIFICATIONS.md           # Full technical specs

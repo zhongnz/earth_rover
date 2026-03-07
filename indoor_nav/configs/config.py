@@ -63,12 +63,15 @@ class ControlConfig:
 @dataclass
 class PolicyConfig:
     # Which policy backend to use
-    # Options: "nomad", "vint", "vlm_hybrid", "vla", "heuristic"
+    # Options: "nomad", "vint", "gnm", "vlm_hybrid", "vla", "heuristic"
     backend: str = "vlm_hybrid"           # CHANGED: VLM-hybrid is now default
 
     # Model paths / endpoints
     model_path: str = "models/nomad/nomad_indoor.pt"
     device: str = "cuda"                  # "cuda" or "cpu"
+    nomad_repo_root: str = ""             # optional path to visualnav-transformer checkout
+    nomad_config_path: str = ""           # optional path to official nomad.yaml
+    nomad_num_samples: int = 1            # diffusion samples per tick for official NoMaD
 
     # NoMaD / ViNT specific
     context_length: int = 5               # number of past frames for context
