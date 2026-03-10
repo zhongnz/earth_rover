@@ -14,8 +14,6 @@ import time
 from enum import Enum, auto
 from typing import Optional
 
-import numpy as np
-
 from indoor_nav.configs.config import RecoveryConfig
 from indoor_nav.modules.sdk_client import RoverSDKClient
 
@@ -53,38 +51,147 @@ class RecoveryManager:
         self._total_recoveries: int = 0
         self._is_recovering: bool = False
         self._last_commanded_nonzero: float = 0.0
+        self._motion_ref_orientation: Optional[float] = None
+        self._last_stuck_detail: str = "no stuck condition recorded"
 
     @property
     def is_recovering(self) -> bool:
         return self._is_recovering
+
+    @property
+    def last_stuck_detail(self) -> str:
+        return self._last_stuck_detail
 
     def note_command(self, linear: float, angular: float):
         """Called every control tick to track if we're commanding motion."""
         if abs(linear) > 0.05 or abs(angular) > 0.05:
             self._last_commanded_nonzero = time.time()
 
-    def check_stuck(self, speed: float, linear_cmd: float) -> bool:
+    @staticmethod
+    def _angle_delta_deg(current: Optional[float], reference: Optional[float]) -> float:
+        if current is None or reference is None:
+            return 0.0
+        try:
+            delta = (float(current) - float(reference) + 180.0) % 360.0 - 180.0
+        except Exception:
+            return 0.0
+        return abs(delta)
+
+    @staticmethod
+    def _mean_abs_rpm(rpms) -> Optional[float]:
+        if not rpms:
+            return None
+        values = []
+        for item in rpms:
+            if not isinstance(item, (list, tuple)) or len(item) < 4:
+                continue
+            try:
+                values.extend(abs(float(v)) for v in item[:4])
+            except Exception:
+                continue
+        if not values:
+            return None
+        return sum(values) / len(values)
+
+    def _clear_stuck_window(self, *, orientation: Optional[float] = None, detail: str = ""):
+        self._stuck_start = None
+        self._motion_ref_orientation = float(orientation) if orientation is not None else None
+        if detail:
+            self._last_stuck_detail = detail
+
+    def check_stuck(
+        self,
+        speed: float,
+        linear_cmd: float,
+        angular_cmd: float = 0.0,
+        orientation: Optional[float] = None,
+        rpms=None,
+    ) -> bool:
         """
         Returns True if the robot appears stuck.
 
-        Stuck = speed near zero while we've been commanding forward motion
-        for longer than stuck_timeout.
+        Robust stuck detection uses more than one telemetry channel:
+        - translational progress: reported speed
+        - rotational progress: heading change while commanding turns
+        - drivetrain engagement: wheel RPMs, if present
+
+        We only escalate to recovery when commands persist and the robot shows
+        no evidence of translational or rotational progress for the configured
+        timeout. If RPM telemetry is present and shows no wheel activity, we
+        bias toward "not enough evidence yet" instead of false-positive stuck.
         """
         if not self.cfg.enabled:
             return False
         if self._is_recovering:
             return False
 
-        commanding_motion = abs(linear_cmd) > 0.05
-        barely_moving = abs(speed) < 0.05  # speed from telemetry
+        now = time.time()
+        commanding_translation = abs(linear_cmd) > self.cfg.stuck_linear_cmd_thresh
+        commanding_rotation = abs(angular_cmd) > self.cfg.stuck_angular_cmd_thresh
 
-        if commanding_motion and barely_moving:
-            if self._stuck_start is None:
-                self._stuck_start = time.time()
-            elif time.time() - self._stuck_start > 8.0:  # seconds
-                return True
-        else:
-            self._stuck_start = None
+        if not (commanding_translation or commanding_rotation):
+            self._clear_stuck_window(
+                orientation=orientation,
+                detail="commands below stuck thresholds",
+            )
+            return False
+
+        translational_progress = abs(speed) >= self.cfg.stuck_speed_thresh
+        heading_delta = self._angle_delta_deg(orientation, self._motion_ref_orientation)
+        rotational_progress = commanding_rotation and (
+            heading_delta >= self.cfg.stuck_heading_delta_thresh
+        )
+
+        mean_abs_rpm = self._mean_abs_rpm(rpms)
+        drivetrain_engaged = (
+            mean_abs_rpm is None
+            or mean_abs_rpm >= self.cfg.stuck_rpm_active_thresh
+        )
+
+        if translational_progress or rotational_progress:
+            progress_bits = []
+            if translational_progress:
+                progress_bits.append(f"speed={speed:.3f}")
+            if rotational_progress:
+                progress_bits.append(f"heading_delta={heading_delta:.1f}deg")
+            self._clear_stuck_window(
+                orientation=orientation,
+                detail="progress observed: " + ", ".join(progress_bits),
+            )
+            return False
+
+        if self._motion_ref_orientation is None and orientation is not None:
+            self._motion_ref_orientation = float(orientation)
+
+        if not drivetrain_engaged:
+            self._clear_stuck_window(
+                orientation=orientation,
+                detail=(
+                    f"commanded motion but drivetrain not engaged "
+                    f"(mean_abs_rpm={mean_abs_rpm:.2f})"
+                ),
+            )
+            return False
+
+        if self._stuck_start is None:
+            self._stuck_start = now
+            self._last_stuck_detail = (
+                "candidate stuck window started: "
+                f"speed={speed:.3f}, linear={linear_cmd:.3f}, angular={angular_cmd:.3f}, "
+                f"heading_delta={heading_delta:.1f}deg, "
+                f"mean_abs_rpm={mean_abs_rpm if mean_abs_rpm is not None else 'n/a'}"
+            )
+            return False
+
+        elapsed = now - self._stuck_start
+        if elapsed >= self.cfg.stuck_timeout:
+            self._last_stuck_detail = (
+                "stuck confirmed: "
+                f"elapsed={elapsed:.1f}s, speed={speed:.3f}, linear={linear_cmd:.3f}, "
+                f"angular={angular_cmd:.3f}, heading_delta={heading_delta:.1f}deg, "
+                f"mean_abs_rpm={mean_abs_rpm if mean_abs_rpm is not None else 'n/a'}"
+            )
+            return True
 
         return False
 
@@ -134,10 +241,103 @@ class RecoveryManager:
 
         return behavior_name
 
+    async def execute_relocalize_rotate(
+        self,
+        duration: Optional[float] = None,
+        angular: Optional[float] = None,
+    ) -> str:
+        """
+        SLAM-aware recovery behavior for lost tracking.
+
+        This is intentionally separate from the stuck-recovery escalation ladder:
+        - it does not advance `_recovery_level`
+        - it performs a bounded in-place rotation to help a visual SLAM backend
+          reacquire features and relocalize
+        """
+        if not self.cfg.enabled:
+            return "disabled"
+        if self._is_recovering:
+            return "busy"
+
+        self._is_recovering = True
+        self._total_recoveries += 1
+        behavior_name = "relocalize_rotate"
+
+        try:
+            spin_speed = float(angular if angular is not None else self.cfg.rotation_speed)
+            spin_duration = float(duration if duration is not None else min(self.cfg.rotation_duration, 3.0))
+            logger.info(
+                "RECOVERY [slam] executing: %s (duration=%.1fs, angular=%.2f, total recoveries: %d)",
+                behavior_name,
+                spin_duration,
+                spin_speed,
+                self._total_recoveries,
+            )
+
+            end = time.time() + spin_duration
+            while time.time() < end:
+                await self.sdk.send_control(0.0, spin_speed)
+                await asyncio.sleep(0.05)
+        except Exception as e:
+            logger.error("Recovery behavior %s failed: %s", behavior_name, e)
+        finally:
+            await self.sdk.stop(duration=0.5)
+            self._stuck_start = None
+            self._is_recovering = False
+
+        return behavior_name
+
+    async def execute_pose_backtrack(
+        self,
+        angular_bias: float = 0.0,
+        duration: Optional[float] = None,
+        linear: Optional[float] = None,
+    ) -> str:
+        """
+        Pose-aware reverse maneuver for SLAM-backed recovery.
+
+        This uses a caller-provided steering bias derived from recent pose
+        history, but keeps the behavior itself simple and bounded.
+        """
+        if not self.cfg.enabled:
+            return "disabled"
+        if self._is_recovering:
+            return "busy"
+
+        self._is_recovering = True
+        self._total_recoveries += 1
+        behavior_name = "pose_backtrack"
+
+        try:
+            reverse_speed = float(linear if linear is not None else self.cfg.backup_speed)
+            reverse_duration = float(duration if duration is not None else self.cfg.backup_duration)
+            steer = max(-self.cfg.turn_speed, min(self.cfg.turn_speed, float(angular_bias)))
+            logger.info(
+                "RECOVERY [slam] executing: %s (duration=%.1fs, linear=%.2f, angular=%.2f, total recoveries: %d)",
+                behavior_name,
+                reverse_duration,
+                reverse_speed,
+                steer,
+                self._total_recoveries,
+            )
+
+            end = time.time() + reverse_duration
+            while time.time() < end:
+                await self.sdk.send_control(reverse_speed, steer)
+                await asyncio.sleep(0.05)
+        except Exception as e:
+            logger.error("Recovery behavior %s failed: %s", behavior_name, e)
+        finally:
+            await self.sdk.stop(duration=0.5)
+            self._stuck_start = None
+            self._is_recovering = False
+
+        return behavior_name
+
     def reset(self):
         """Reset recovery state (e.g. after reaching a checkpoint)."""
         self._recovery_level = 0
-        self._stuck_start = None
+        self._clear_stuck_window(detail="recovery state reset")
 
     async def _back_up(self):
         """Reverse at moderate speed."""

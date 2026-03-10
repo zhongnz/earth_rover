@@ -2,15 +2,39 @@ import os
 import time
 import curses
 import requests
-from threading import Lock
-
-
-# Global keyboard listener for simultaneous keys
-from pynput import keyboard as _pynput_kb  # type: ignore
 
 DEFAULT_BASE_URL = os.getenv("SDK_URL", "http://127.0.0.1:8000")
 CONTROL_URL = f"{DEFAULT_BASE_URL}/control"
 SDK_URL = f"{DEFAULT_BASE_URL}/sdk"
+SDK_STATUS_URL = f"{DEFAULT_BASE_URL}/sdk-status"
+KEY_HOLD_TIMEOUT_S = 0.35
+
+MOVEMENT_KEYMAP = {
+    ord("w"): "w",
+    ord("W"): "w",
+    curses.KEY_UP: "w",
+    ord("s"): "s",
+    ord("S"): "s",
+    curses.KEY_DOWN: "s",
+    ord("a"): "a",
+    ord("A"): "a",
+    curses.KEY_LEFT: "a",
+    ord("d"): "d",
+    ord("D"): "d",
+    curses.KEY_RIGHT: "d",
+}
+
+STOP_KEYS = {
+    ord(" "),
+    curses.KEY_BACKSPACE,
+    127,
+    8,
+}
+
+QUIT_KEYS = {
+    ord("q"),
+    ord("Q"),
+}
 
 
 def clamp(value: float, min_value: float = -1.0, max_value: float = 1.0) -> float:
@@ -19,11 +43,14 @@ def clamp(value: float, min_value: float = -1.0, max_value: float = 1.0) -> floa
 
 def initialize_sdk_session() -> None:
     try:
-        # Trigger the SDK page once to ensure backend RTM session is ready
-        requests.get(SDK_URL, timeout=5)
+        # Warm the backend Playwright bridge before the first control command.
+        requests.get(SDK_STATUS_URL, timeout=60)
     except Exception:
-        # Non-fatal if this fails; /control path will also lazy-init
-        pass
+        try:
+            requests.get(SDK_URL, timeout=5)
+        except Exception:
+            # Non-fatal if this fails; /control path will also lazy-init
+            pass
 
 
 def calculate_target_from_keys(pressed_keys: set[str]) -> tuple[float, float]:
@@ -61,9 +88,13 @@ def send_command(linear: float, angular: float) -> tuple[bool, str]:
         return False, str(exc)
 
 
+def send_stop_command() -> tuple[bool, str]:
+    return send_command(0.0, 0.0)
+
+
 def draw_ui(stdscr, status: dict) -> None:
     stdscr.erase()
-    stdscr.addstr(0, 0, "Earth Rovers SDK - Keyboard Control (W/A/S/D to drive, Space to stop, +/- speed, Q to quit)")
+    stdscr.addstr(0, 0, "Earth Rovers SDK - Keyboard Control (Arrows or W/A/S/D to drive, Space to stop, +/- speed, Q to quit)")
     stdscr.addstr(2, 0, f"Base URL: {DEFAULT_BASE_URL}")
     stdscr.addstr(3, 0, f"Tick: {status['tick_ms']} ms, Smoothing: {int(status['smoothing']*100)}%  MaxSpeed: {status['max_speed']:.2f}  Input: {status['input_mode']}")
     stdscr.addstr(5, 0, f"Target linear: {status['target_linear']:+.2f}   Target angular: {status['target_angular']:+.2f}")
@@ -76,57 +107,19 @@ def draw_ui(stdscr, status: dict) -> None:
 def main(stdscr) -> None:
     curses.curs_set(0)
     stdscr.nodelay(True)
-    stdscr.timeout(0)
+    stdscr.timeout(10)
+    stdscr.keypad(True)
 
     initialize_sdk_session()
 
     update_interval_s = 0.05  # 20 Hz
     smoothing = 0.5  # 0..1
     max_speed = 0.5  # scales target output
-    # input driven entirely by pynput listener
+    # Terminal-native curses input relies on key repeat, so we keep
+    # each movement key active briefly after its last event.
 
     pressed_keys: set[str] = set()
-
-    # Shared state for pynput listener
-    held_keys: set[str] = set()
-    held_lock: Lock = Lock()
-    quit_requested = False
-    listener = None
-
-    def _normalize_key(k) -> str | None:
-        try:
-            if isinstance(k, _pynput_kb.KeyCode) and k.char:
-                return k.char.lower()
-            if k == _pynput_kb.Key.esc:
-                return "esc"
-            if k == _pynput_kb.Key.space:
-                return "space"
-        except Exception:
-            return None
-        return None
-
-    def _on_press(k):
-        nonlocal quit_requested
-        name = _normalize_key(k)
-        if name is None:
-            return
-        if name in ("q", "esc"):
-            quit_requested = True
-            return
-        with held_lock:
-            held_keys.add(name)
-
-    def _on_release(k):
-        name = _normalize_key(k)
-        if name is None:
-            return
-        with held_lock:
-            if name in held_keys:
-                held_keys.remove(name)
-
-    listener = _pynput_kb.Listener(on_press=_on_press, on_release=_on_release)
-    listener.daemon = True
-    listener.start()
+    held_until = {key: 0.0 for key in ("w", "a", "s", "d")}
     current_linear = 0.0
     current_angular = 0.0
     target_linear = 0.0
@@ -136,37 +129,40 @@ def main(stdscr) -> None:
     start_time = time.time()
 
     while True:
-        # Read held keys snapshot from listener
-        with held_lock:
-            snapshot = set(held_keys)
+        loop_now = time.monotonic()
+        quit_requested = False
+        force_stop = False
+
+        key = stdscr.getch()
+        while key != -1:
+            if key in QUIT_KEYS:
+                quit_requested = True
+            elif key in STOP_KEYS:
+                for name in held_until:
+                    held_until[name] = 0.0
+                force_stop = True
+            elif key in (ord("+"), ord("=")):
+                max_speed = clamp(max_speed + 0.05, 0.05, 1.0)
+            elif key in (ord("-"), ord("_")):
+                max_speed = clamp(max_speed - 0.05, 0.05, 1.0)
+            else:
+                mapped = MOVEMENT_KEYMAP.get(key)
+                if mapped is not None:
+                    held_until[mapped] = loop_now + KEY_HOLD_TIMEOUT_S
+            key = stdscr.getch()
 
         if quit_requested:
-            try:
-                listener.stop()
-            except Exception:
-                pass
+            send_stop_command()
             return
 
-        pressed_keys = {k for k in ("w", "a", "s", "d") if k in snapshot}
+        pressed_keys = {
+            name for name, until in held_until.items() if until > loop_now
+        }
 
-        # Space = immediate stop while held
-        if "space" in snapshot:
+        if force_stop:
             pressed_keys.clear()
             target_linear = 0.0
             target_angular = 0.0
-
-        # Drain any pending curses input for speed/backspace
-        key = stdscr.getch()
-        while key != -1:
-            try:
-                if key in (ord("+"), ord("=")):
-                    max_speed = clamp(max_speed + 0.05, 0.05, 1.0)
-                elif key in (ord("-"), ord("_")):
-                    max_speed = clamp(max_speed - 0.05, 0.05, 1.0)
-                elif key == curses.KEY_BACKSPACE:
-                    pressed_keys.clear()
-            finally:
-                key = stdscr.getch()
 
         # Derive targets from active keys
         t_linear, t_angular = calculate_target_from_keys(pressed_keys)
@@ -196,7 +192,7 @@ def main(stdscr) -> None:
             "last_send_result": last_send_result,
             "last_send_time": last_send_time,
             "pressed": pressed_keys,
-            "input_mode": "pynput",
+            "input_mode": "curses",
         }
 
         draw_ui(stdscr, status)
@@ -207,6 +203,4 @@ if __name__ == "__main__":
     try:
         curses.wrapper(main)
     except KeyboardInterrupt:
-        pass
-
-
+        send_stop_command()

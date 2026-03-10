@@ -63,12 +63,18 @@ class BotState:
         )
 
 
-def decode_b64_image(b64_str: str) -> Optional[np.ndarray]:
-    """Decode a base64 string to a BGR numpy image."""
+def decode_b64_image(b64_str: str, *, min_side: int = 32) -> Optional[np.ndarray]:
+    """Decode a base64 string to a BGR numpy image and reject tiny placeholder frames."""
     try:
         img_bytes = base64.b64decode(b64_str)
         arr = np.frombuffer(img_bytes, dtype=np.uint8)
         img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if img is None:
+            return None
+        h, w = img.shape[:2]
+        if h < min_side or w < min_side:
+            logger.debug("Rejected tiny frame: %dx%d", w, h)
+            return None
         return img
     except Exception:
         return None

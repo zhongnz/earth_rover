@@ -1,0 +1,37 @@
+# Placeholder ORB-SLAM3 camera settings file.
+# Replace these values with a real calibration for the rover front camera
+# before enabling SLAM in a live run.
+
+%YAML:1.0
+
+Camera.type: "PinHole"
+Camera.width: 1024
+Camera.height: 576
+Camera.fx: 700.0
+Camera.fy: 700.0
+Camera.cx: 512.0
+Camera.cy: 288.0
+Camera.k1: 0.0
+Camera.k2: 0.0
+Camera.p1: 0.0
+Camera.p2: 0.0
+Camera.k3: 0.0
+Camera.fps: 10.0
+Camera.RGB: 1
+
+ORBextractor.nFeatures: 1000
+ORBextractor.scaleFactor: 1.2
+ORBextractor.nLevels: 8
+ORBextractor.iniThFAST: 20
+ORBextractor.minThFAST: 7
+
+Viewer.KeyFrameSize: 0.05
+Viewer.KeyFrameLineWidth: 1.0
+Viewer.GraphLineWidth: 0.9
+Viewer.PointSize: 2.0
+Viewer.CameraSize: 0.08
+Viewer.CameraLineWidth: 3.0
+Viewer.ViewpointX: 0.0
+Viewer.ViewpointY: -0.7
+Viewer.ViewpointZ: -1.8
+Viewer.ViewpointF: 500.0

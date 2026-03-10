@@ -26,6 +26,7 @@ transformers>=4.44.0          # DINOv2, SigLIP2, Depth Anything V2, OpenVLA
 #   Note: DINOv3 model access may require accepted-access request and DINOv3 license.
 # SigLIP2:                         via transformers (google/siglip2-base-patch16-224)
 # EigenPlaces (optional):          requires torch.hub access
+# CosPlace (optional):             requires torch.hub access
 
 # --- Depth Estimation ---
 # Depth Anything V2:  included via transformers (depth-anything/Depth-Anything-V2-Base-hf)

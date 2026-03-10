@@ -2,6 +2,7 @@
 .env
 __pycache__/
 .vscode/
+*.Zone.Identifier
 
 node_modules/
 screenshots/*.png
@@ -11,3 +12,18 @@ plots/
 matches/
 exported_frames/
 .models/
+
+# Generated evaluation artifacts and imported benchmark data
+indoor_nav/datasets/
+indoor_nav/match_reports/
+
+# Local model weights
+indoor_nav/models/*.pth
+
+# Local native builds
+external/orbslam3_sidecar/build/
+external/pangolin-install/
+external/ORB_SLAM3/
+external/Pangolin/
+external/diffusion_policy/
+external/visualnav-transformer/

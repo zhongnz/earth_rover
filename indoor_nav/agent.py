@@ -24,6 +24,7 @@ The agent runs an async control loop at ~10 Hz:
 from __future__ import annotations
 
 import asyncio
+import math
 import logging
 import os
 import signal
@@ -42,6 +43,8 @@ from indoor_nav.modules.obstacle_avoidance import ObstacleDetector, ObstacleInfo
 from indoor_nav.modules.recovery import RecoveryManager
 from indoor_nav.modules.topological_memory import TopologicalMemory, TopoMapConfig
 from indoor_nav.policies.base_policy import BasePolicy, PolicyInput, PolicyOutput
+from indoor_nav.slam.orbslam3_client import ORBSLAM3Client
+from indoor_nav.slam.types import SlamStatus
 
 logger = logging.getLogger(__name__)
 
@@ -76,10 +79,24 @@ class IndoorNavigationAgent:
         self.checkpoint_mgr = CheckpointManager(cfg.goal)
         self.obstacle_det = ObstacleDetector(cfg.obstacle) if cfg.obstacle.enabled else None
         self.recovery_mgr = RecoveryManager(cfg.recovery, self.sdk)
+        self.slam: Optional[ORBSLAM3Client] = None
+        self._slam_status = SlamStatus()
+        self._slam_pose_history: deque = deque(maxlen=max(10, int(cfg.control.loop_hz * 6)))
+        self._last_slam_ok_time: float = 0.0
+        self._last_slam_push_time: float = 0.0
+        self._last_slam_failure_log_time: float = 0.0
+        self._last_slam_gate_log_time: float = 0.0
+        self._last_slam_relocalize_time: float = 0.0
+        self._topo_suppressed_by_slam: bool = bool(cfg.slam.enabled and cfg.topo_memory.enabled)
+
+        if cfg.slam.enabled:
+            if cfg.slam.backend != "orbslam3":
+                raise ValueError(f"Unsupported SLAM backend: {cfg.slam.backend}")
+            self.slam = ORBSLAM3Client(cfg.slam)
 
         # Topological memory (SOTA 2025: visual graph for planning)
         self.topo_memory: Optional[TopologicalMemory] = None
-        if cfg.topo_memory.enabled:
+        if cfg.topo_memory.enabled and not cfg.slam.enabled:
             topo_cfg = TopoMapConfig(
                 min_node_distance=cfg.topo_memory.min_node_distance,
                 scene_change_threshold=cfg.topo_memory.scene_change_threshold,
@@ -173,9 +190,29 @@ class IndoorNavigationAgent:
         if self.obstacle_det:
             logger.info("Obstacle detection: %s", self.cfg.obstacle.method)
 
+        # 3a. Initialize SLAM client
+        if self.slam:
+            logger.info(
+                "SLAM: %s (%s @ %s)",
+                self.cfg.slam.backend,
+                self.cfg.slam.mode,
+                self.cfg.slam.endpoint,
+            )
+            try:
+                await self.slam.start()
+                self._slam_status = await self.slam.status()
+            except Exception as exc:
+                raise RuntimeError(
+                    f"SLAM sidecar startup failed at {self.cfg.slam.endpoint}: {exc}"
+                ) from exc
+            self._last_slam_ok_time = time.time()
+            logger.info("SLAM sidecar ready. Tracking state: %s", self._slam_status.tracking_state)
+
         # 3b. Initialize topological memory
         if self.topo_memory:
             logger.info("Topological memory: ON (max %d nodes)", self.cfg.topo_memory.max_nodes)
+        elif self._topo_suppressed_by_slam:
+            logger.info("Topological memory: OFF (suppressed because SLAM is enabled)")
 
         # 4. Initialize data logger
         if self.cfg.log.enabled:
@@ -275,7 +312,21 @@ class IndoorNavigationAgent:
         # Update context
         self._context_images.append(front_image)
 
-        # ---- 1b. Topological memory update ----
+        # ---- 1b. SLAM update ----
+        slam_status = self._slam_status
+        if self.slam:
+            slam_status = await self._update_slam(front_image, frame_ts, bot_state)
+            if self._should_run_slam_relocalization(slam_status):
+                logger.warning(
+                    "SLAM tracking lost too long. Initiating relocalization rotate (state=%s).",
+                    slam_status.tracking_state,
+                )
+                self.state = AgentState.RECOVERING
+                self._last_slam_relocalize_time = time.time()
+                await self.recovery_mgr.execute_relocalize_rotate()
+                return
+
+        # ---- 1c. Topological memory update ----
         if self.topo_memory:
             self.topo_memory.update(
                 front_image,
@@ -328,6 +379,9 @@ class IndoorNavigationAgent:
             speed=bot_state.speed,
             obstacle_speed_factor=obstacle_info.speed_factor,
             obstacle_steer_bias=obstacle_info.steer_bias,
+            slam_tracking_state=slam_status.tracking_state,
+            slam_pose=slam_status.pose,
+            slam_keyframe_id=slam_status.keyframe_id,
         )
 
         action = self.policy.predict(policy_input)
@@ -352,15 +406,45 @@ class IndoorNavigationAgent:
         self._prev_linear = linear
         self._prev_angular = angular
 
-        # ---- 7. Send command ----
+        # ---- 7. SLAM gating + send command ----
+        slam_gate_reason = self._slam_motion_block_reason()
+        if slam_gate_reason:
+            now = time.time()
+            if now - self._last_slam_gate_log_time >= 2.0:
+                logger.warning("SLAM gating motion: %s", slam_gate_reason)
+                self._last_slam_gate_log_time = now
+            self.state = AgentState.PAUSED
+            linear = 0.0
+            angular = 0.0
+
         await self.sdk.send_control(linear, angular)
         self.recovery_mgr.note_command(linear, angular)
 
         # ---- 8. Stuck detection ----
-        if self.recovery_mgr.check_stuck(bot_state.speed, linear):
-            logger.warning("Robot appears STUCK. Initiating recovery...")
+        if self.recovery_mgr.check_stuck(
+            bot_state.speed,
+            linear,
+            angular_cmd=angular,
+            orientation=bot_state.orientation,
+            rpms=bot_state.rpms,
+        ):
             self.state = AgentState.RECOVERING
-            await self.recovery_mgr.execute_recovery()
+            slam_backtrack_angular = self._compute_slam_backtrack_angular(slam_status)
+            if slam_backtrack_angular is not None:
+                logger.warning(
+                    "Robot appears STUCK. Initiating SLAM pose backtrack... (%s, angular_bias=%.2f)",
+                    self.recovery_mgr.last_stuck_detail,
+                    slam_backtrack_angular,
+                )
+                await self.recovery_mgr.execute_pose_backtrack(
+                    angular_bias=slam_backtrack_angular
+                )
+            else:
+                logger.warning(
+                    "Robot appears STUCK. Initiating recovery... (%s)",
+                    self.recovery_mgr.last_stuck_detail,
+                )
+                await self.recovery_mgr.execute_recovery()
             self.state = AgentState.NAVIGATING
 
         # ---- 9. Logging ----
@@ -377,8 +461,13 @@ class IndoorNavigationAgent:
             topo_str = ""
             if self.topo_memory:
                 topo_str = f" | {self.topo_memory.status_str()}"
+            slam_str = ""
+            if self.slam:
+                slam_str = f" | SLAM:{slam_status.tracking_state}"
+                if slam_status.keyframe_id is not None:
+                    slam_str += f" kf={slam_status.keyframe_id}"
             logger.info(
-                "[%.0fs] %s | %s | lin=%.2f ang=%.2f | speed=%.1f bat=%.0f%%%s",
+                "[%.0fs] %s | %s | lin=%.2f ang=%.2f | speed=%.1f bat=%.0f%%%s%s",
                 elapsed,
                 self.state.name,
                 self.checkpoint_mgr.status_str(),
@@ -387,6 +476,7 @@ class IndoorNavigationAgent:
                 bot_state.speed,
                 bot_state.battery,
                 topo_str,
+                slam_str,
             )
 
     async def _on_checkpoint_reached(self):
@@ -406,6 +496,134 @@ class IndoorNavigationAgent:
         except Exception as e:
             logger.debug("Checkpoint report failed (may be expected): %s", e)
 
+    def _build_slam_imu(self, bot_state) -> Optional[dict]:
+        if self.cfg.slam.mode != "mono_inertial":
+            return None
+        return {
+            "timestamp": float(bot_state.timestamp),
+            "accels": bot_state.accels,
+            "gyros": bot_state.gyros,
+        }
+
+    async def _update_slam(self, front_image: np.ndarray, frame_ts: float, bot_state) -> SlamStatus:
+        if not self.slam:
+            return self._slam_status
+
+        now = time.time()
+        min_interval = 1.0 / max(0.1, float(self.cfg.slam.push_hz))
+        if self._last_slam_push_time and (now - self._last_slam_push_time) < min_interval:
+            return self._slam_status
+
+        try:
+            slam_status = await self.slam.track(
+                front_image,
+                frame_ts,
+                imu=self._build_slam_imu(bot_state),
+            )
+            self._slam_status = slam_status
+            self._last_slam_push_time = now
+            if slam_status.is_tracking:
+                self._last_slam_ok_time = now
+                if slam_status.pose is not None:
+                    self._slam_pose_history.append(
+                        (float(frame_ts), slam_status.pose, slam_status.keyframe_id)
+                    )
+            return slam_status
+        except Exception as exc:
+            if now - self._last_slam_failure_log_time >= 2.0:
+                logger.warning("SLAM track update failed: %s", exc)
+                self._last_slam_failure_log_time = now
+            self._last_slam_push_time = now
+            self._slam_status = SlamStatus(
+                ok=False,
+                tracking_state="LOST",
+                frame_ts=float(frame_ts),
+                raw={"error": str(exc)},
+            )
+            return self._slam_status
+
+    def _slam_motion_block_reason(self) -> Optional[str]:
+        if not self.slam or not self.cfg.slam.require_tracking_for_motion:
+            return None
+
+        status = self._slam_status
+        if status.is_tracking:
+            return None
+
+        now = time.time()
+        if self._last_slam_ok_time > 0.0 and (now - self._last_slam_ok_time) < self.cfg.slam.lost_stop_timeout:
+            return None
+
+        if status.frame_ts > 0.0 and (now - status.frame_ts) > self.cfg.slam.pose_stale_timeout:
+            return f"stale SLAM status ({now - status.frame_ts:.1f}s old)"
+
+        return f"tracking_state={status.tracking_state}"
+
+    def _should_run_slam_relocalization(self, status: SlamStatus) -> bool:
+        if not self.slam or not self.cfg.slam.use_for_recovery:
+            return False
+        if self.recovery_mgr.is_recovering:
+            return False
+        if status.is_tracking:
+            return False
+
+        now = time.time()
+        if self._last_slam_ok_time > 0.0 and (now - self._last_slam_ok_time) < self.cfg.slam.lost_stop_timeout:
+            return False
+
+        cooldown = max(1.0, min(self.cfg.recovery.rotation_duration, 3.0))
+        if self._last_slam_relocalize_time > 0.0 and (now - self._last_slam_relocalize_time) < cooldown:
+            return False
+
+        return status.tracking_state in {"LOST", "NOT_INITIALIZED"}
+
+    @staticmethod
+    def _normalize_angle_rad(angle: float) -> float:
+        return math.atan2(math.sin(angle), math.cos(angle))
+
+    def _slam_yaw_rad(self, pose) -> float:
+        return math.atan2(
+            2.0 * (pose.qw * pose.qz + pose.qx * pose.qy),
+            1.0 - 2.0 * (pose.qy * pose.qy + pose.qz * pose.qz),
+        )
+
+    def _compute_slam_backtrack_angular(self, status: SlamStatus) -> Optional[float]:
+        if (
+            not self.slam
+            or not self.cfg.slam.use_for_recovery
+            or not status.is_tracking
+            or status.pose is None
+            or len(self._slam_pose_history) < 2
+        ):
+            return None
+
+        current_pose = status.pose
+        history = list(self._slam_pose_history)
+        min_backtrack_dist = 0.15
+        target_pose = None
+        for _, pose, _ in reversed(history[:-1]):
+            dx = float(pose.tx) - float(current_pose.tx)
+            dz = float(pose.tz) - float(current_pose.tz)
+            if math.hypot(dx, dz) >= min_backtrack_dist:
+                target_pose = pose
+                break
+
+        if target_pose is None:
+            return None
+
+        desired_yaw = math.atan2(
+            float(target_pose.tz) - float(current_pose.tz),
+            float(target_pose.tx) - float(current_pose.tx),
+        )
+        current_yaw = self._slam_yaw_rad(current_pose)
+        yaw_error = self._normalize_angle_rad(desired_yaw - current_yaw)
+
+        if abs(yaw_error) < math.radians(5.0):
+            return 0.0
+
+        scaled = (yaw_error / (math.pi / 2.0)) * float(self.cfg.recovery.turn_speed)
+        return max(-self.cfg.recovery.turn_speed, min(self.cfg.recovery.turn_speed, scaled))
+
     async def shutdown(self):
         """Graceful shutdown: stop robot, close connections, save logs."""
         logger.info("Shutting down navigation agent...")
@@ -417,6 +635,12 @@ class IndoorNavigationAgent:
         if self._data_logger:
             try:
                 self._data_logger.close()
+            except Exception:
+                pass
+
+        if self.slam:
+            try:
+                await self.slam.close()
             except Exception:
                 pass
 

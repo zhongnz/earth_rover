@@ -83,7 +83,7 @@ class PolicyConfig:
     goal_image_size: tuple = (160, 120)   # resize for goal image input
 
     # VLM hybrid settings (SOTA: Qwen2.5-VL 7B)
-    vlm_endpoint: str = ""                # e.g. "http://localhost:8000/v1" for vLLM
+    vlm_endpoint: str = ""                # e.g. "http://127.0.0.1:8001/v1" for vLLM
     vlm_model: str = "Qwen/Qwen2.5-VL-7B-Instruct"  # CHANGED: from llava:13b
     vlm_query_interval: float = 2.5       # seconds between VLM queries
     vlm_api_format: str = "openai"        # "openai", "ollama", "anthropic"
@@ -99,8 +99,10 @@ class PolicyConfig:
 @dataclass
 class GoalConfig:
     # Image-goal matching (SOTA: DINOv2-VLAD / DINOv3-VLAD for visual place recognition)
-    match_method: str = "dinov2_vlad"     # CHANGED: "dinov2_vlad", "dinov3_vlad", "siglip2", "dinov2",
-                                          # "eigenplaces", "clip", "sift"
+    match_method: str = "dinov2_direct"   # "dinov2_direct" (image matching), "wall_crop_direct" (wall-image matching),
+                                          # "wall_rectify_direct" (rectified wall-image matching), "dinov2_vlad",
+                                          # "dinov3_vlad", "siglip2", "dinov2", "eigenplaces",
+                                          # "cosplace", "clip", "sift"
     match_threshold: float = 0.78         # cosine similarity to declare "arrived"
     approach_threshold: float = 0.60      # start slowing down
     match_patience: int = 3               # consecutive frames above threshold → done
@@ -113,8 +115,21 @@ class GoalConfig:
     feature_device: str = "cuda"
     feature_image_size: tuple = (224, 224)
 
+    # CosPlace / EigenPlaces-style global descriptor config
+    cosplace_backbone: str = "ResNet50"
+    cosplace_fc_output_dim: int = 2048
+
     # VLAD aggregation (for dinov2_vlad / dinov3_vlad methods)
     vlad_clusters: int = 32              # number of VLAD cluster centers
+
+    # Wall-image detection stage (for wall_crop_direct / wall_rectify_direct)
+    wall_crop_min_area_frac: float = 0.015
+    wall_crop_max_area_frac: float = 0.85
+    wall_crop_max_aspect_ratio: float = 2.5
+    wall_crop_min_fill_ratio: float = 0.55
+    wall_crop_padding_frac: float = 0.04
+    wall_crop_max_candidates: int = 6
+    wall_crop_score_weight: float = 0.9
 
 
 # ---------------------------------------------------------------------------
@@ -148,12 +163,48 @@ class TopoMemoryConfig:
 
 
 # ---------------------------------------------------------------------------
+# SLAM integration
+# ---------------------------------------------------------------------------
+@dataclass
+class SlamConfig:
+    enabled: bool = False
+    backend: str = "orbslam3"             # currently only "orbslam3" is planned
+    mode: str = "mono"                    # "mono" or "mono_inertial"
+    endpoint: str = "http://127.0.0.1:8765"
+
+    # Sidecar assets
+    vocab_path: str = "external/ORB_SLAM3/Vocabulary/ORBvoc.txt"
+    settings_path: str = "indoor_nav/slam/calib/front_camera.yaml"
+
+    # Frame transport
+    push_hz: float = 10.0
+    jpeg_quality: int = 80
+    resize_width: int = 1024
+    resize_height: int = 576
+
+    # Runtime gating
+    pose_stale_timeout: float = 0.5
+    lost_stop_timeout: float = 1.0
+    require_tracking_for_motion: bool = False
+
+    # Recovery / logging hooks
+    use_for_recovery: bool = True
+    log_pose_trace: bool = True
+
+
+# ---------------------------------------------------------------------------
 # Recovery behaviors
 # ---------------------------------------------------------------------------
 @dataclass
 class RecoveryConfig:
     enabled: bool = True
     max_retries: int = 3
+    stuck_timeout: float = 8.0          # seconds with commanded motion but no observed progress
+    stuck_speed_thresh: float = 0.05    # translational speed below this counts as no forward progress
+    stuck_linear_cmd_thresh: float = 0.05
+    stuck_angular_cmd_thresh: float = 0.12
+    stuck_heading_delta_thresh: float = 8.0   # degrees of heading change that counts as rotational progress
+    stuck_rpm_active_thresh: float = 5.0      # mean absolute wheel RPM treated as drivetrain engagement
     # Behavior sequence when stuck
     behaviors: List[str] = field(default_factory=lambda: [
         "back_up",           # reverse for 1-2 seconds
@@ -194,6 +245,7 @@ class IndoorNavConfig:
     goal: GoalConfig = field(default_factory=GoalConfig)
     obstacle: ObstacleConfig = field(default_factory=ObstacleConfig)
     topo_memory: TopoMemoryConfig = field(default_factory=TopoMemoryConfig)
+    slam: SlamConfig = field(default_factory=SlamConfig)
     recovery: RecoveryConfig = field(default_factory=RecoveryConfig)
     log: LogConfig = field(default_factory=LogConfig)
 

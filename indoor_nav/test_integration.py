@@ -46,11 +46,12 @@ async def test_config_defaults():
     cfg = IndoorNavConfig()
     assert cfg.policy.backend == "vlm_hybrid", f"Expected vlm_hybrid, got {cfg.policy.backend}"
     assert cfg.policy.vlm_model == "Qwen/Qwen2.5-VL-7B-Instruct", f"Expected Qwen2.5-VL, got {cfg.policy.vlm_model}"
-    assert cfg.goal.match_method == "dinov2_vlad", f"Expected dinov2_vlad, got {cfg.goal.match_method}"
+    assert cfg.goal.match_method == "dinov2_direct", f"Expected dinov2_direct, got {cfg.goal.match_method}"
     supported_match_methods = {
-        "dinov2_vlad", "dinov3_vlad", "siglip2", "dinov2", "eigenplaces", "clip", "sift"
+        "dinov2_direct", "wall_crop_direct", "wall_rectify_direct", "dinov2_vlad", "dinov3_vlad", "siglip2", "dinov2", "eigenplaces", "cosplace", "clip", "sift"
     }
     assert "dinov3_vlad" in supported_match_methods
+    assert "cosplace" in supported_match_methods
     assert "dinov2-with-registers" in cfg.goal.feature_model, \
         f"Expected dinov2-with-registers, got {cfg.goal.feature_model}"
     assert "Base" in cfg.obstacle.depth_model or "base" in cfg.obstacle.depth_model.lower(), \
@@ -167,7 +168,7 @@ async def test_vlm_policy_init():
     cfg = PolicyConfig(
         backend="vlm_hybrid",
         vlm_model="Qwen/Qwen2.5-VL-7B-Instruct",
-        vlm_endpoint="http://localhost:8000/v1",
+        vlm_endpoint="http://127.0.0.1:8001/v1",
     )
     policy = VLMHybridPolicy(cfg)
     policy.setup()

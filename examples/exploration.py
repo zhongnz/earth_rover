@@ -2,6 +2,7 @@ import argparse
 import os
 import sys
 import time
+from queue import Empty, Queue
 from threading import Event, Thread
 from typing import Optional
 
@@ -23,7 +24,9 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def start_logging_thread(base_url: str, rate_hz: float, out_path: Optional[str], gzip_level: int) -> tuple[Thread, Event, str]:
+def start_logging_thread(
+    base_url: str, rate_hz: float, out_path: Optional[str], gzip_level: int
+) -> tuple[Thread, Event, str, Queue[tuple[float, float, float]]]:
     # Lazy import from local directory; this file should be run from project root
     try:
         from utils.data_logger import H5DataLogger, build_default_output_path  # type: ignore
@@ -32,24 +35,39 @@ def start_logging_thread(base_url: str, rate_hz: float, out_path: Optional[str],
         raise
 
     stop_event: Event = Event()
+    control_queue: Queue[tuple[float, float, float]] = Queue()
     output_path = out_path or build_default_output_path()
     interval = 1.0 / max(0.1, rate_hz)
     data_url = base_url.rstrip("/") + "/data"
     sdk_url = base_url.rstrip("/") + "/sdk"
+    sdk_status_url = base_url.rstrip("/") + "/sdk-status"
     v2_url = base_url.rstrip("/") + "/v2/screenshot"
 
     def _runner() -> None:
         # Initialize SDK page once (non-fatal)
         try:
-            requests.get(sdk_url, timeout=5)
+            requests.get(sdk_status_url, timeout=60)
         except Exception:
-            pass
+            try:
+                requests.get(sdk_url, timeout=5)
+            except Exception:
+                pass
 
         # Overwrite file for each exploration session
         logger = H5DataLogger(output_path, compression="gzip", compression_level=gzip_level, mode="w")
+
+        def drain_control_queue() -> None:
+            while True:
+                try:
+                    ts, linear, angular = control_queue.get_nowait()
+                except Empty:
+                    break
+                logger.log_control(linear, angular, ts)
+
         try:
             while not stop_event.is_set():
                 start = time.time()
+                drain_control_queue()
                 try:
                     resp = requests.get(data_url, timeout=5)
                     if resp.ok:
@@ -76,33 +94,27 @@ def start_logging_thread(base_url: str, rate_hz: float, out_path: Optional[str],
                 sleep_s = max(0.0, interval - elapsed)
                 stop_event.wait(sleep_s)
         finally:
+            drain_control_queue()
             logger.close()
 
     th = Thread(target=_runner, daemon=True)
     th.start()
-    return th, stop_event, output_path
+    return th, stop_event, output_path, control_queue
 
 
-def wrap_keyboard_send_logging(log_path: str) -> None:
+def wrap_keyboard_send_logging(control_queue: Queue[tuple[float, float, float]]) -> None:
     """Monkey-patch keyboard_control.send_command to also log commanded velocities."""
     try:
-        from utils.data_logger import H5DataLogger  # type: ignore
         from utils import keyboard_control  # type: ignore
         import time as _time
     except Exception:
         return
 
-    # Append to the same session file for command taps
-    logger = H5DataLogger(log_path, mode="a")
-
     original_send = keyboard_control.send_command
 
     def _wrapped(linear: float, angular: float):
         ts = _time.time()
-        try:
-            logger.log_control(linear, angular, ts)
-        except Exception:
-            pass
+        control_queue.put((ts, float(linear), float(angular)))
         return original_send(linear, angular)
 
     keyboard_control.send_command = _wrapped  # type: ignore
@@ -115,10 +127,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     os.environ["SDK_URL"] = args.url
 
     # Start logging in the background
-    log_thread, stop_event, log_path = start_logging_thread(args.url, args.rate, args.out, args.gzip)
+    log_thread, stop_event, log_path, control_queue = start_logging_thread(
+        args.url, args.rate, args.out, args.gzip
+    )
 
     # Patch keyboard send to log commanded velocities into the same HDF5
-    wrap_keyboard_send_logging(log_path)
+    wrap_keyboard_send_logging(control_queue)
 
     # Run keyboard controller (foreground, curses UI)
     try:
@@ -131,18 +145,23 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(f"Failed to start keyboard control: {exc}")
         return 1
 
+    exit_code = 0
     try:
         curses.wrapper(keyboard_control.main)
+    except KeyboardInterrupt:
+        exit_code = 130
+        try:
+            keyboard_control.send_stop_command()
+        except Exception:
+            pass
     finally:
         # Graceful shutdown of logging
         stop_event.set()
         log_thread.join(timeout=5.0)
         print(f"Exploration ended. Log saved to: {log_path}")
 
-    return 0
+    return exit_code
 
 
 if __name__ == "__main__":
     sys.exit(main())
-
-

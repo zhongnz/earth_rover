@@ -5,7 +5,7 @@ run_indoor.py — Launch the Indoor Navigation Agent (SOTA 2025).
 Usage:
   # With goal images directory (RECOMMENDED — Qwen2.5-VL + DINOv2-VLAD):
   python indoor_nav/run_indoor.py --goals indoor_nav/goals/ \\
-      --policy vlm_hybrid --vlm-endpoint http://localhost:8000/v1 \\
+      --policy vlm_hybrid --vlm-endpoint http://127.0.0.1:8001/v1 \\
       --vlm-model Qwen/Qwen2.5-VL-7B-Instruct --match-method dinov2_vlad
 
   # DINOv3-VLAD evaluation mode:
@@ -55,7 +55,11 @@ Usage:
   # Full competition run with mission:
   python indoor_nav/run_indoor.py --goals indoor_nav/goals/ --policy vlm_hybrid \\
       --url http://127.0.0.1:8000 --mission-slug indoor-mission-1 \\
-      --vlm-endpoint http://localhost:8000/v1
+      --vlm-endpoint http://127.0.0.1:8001/v1
+
+  # SLAM scaffold enabled (sidecar must be running separately):
+  python indoor_nav/run_indoor.py --goals indoor_nav/goals/ --policy heuristic \\
+      --slam-backend orbslam3 --slam-endpoint http://127.0.0.1:8765
 """
 
 from __future__ import annotations
@@ -67,11 +71,18 @@ import os
 import signal
 import sys
 
+try:
+    from dotenv import load_dotenv
+except ImportError:  # pragma: no cover - optional convenience dependency
+    def load_dotenv(*args, **kwargs):
+        return False
+
 # Add project root to path
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
+load_dotenv(os.path.join(PROJECT_ROOT, ".env"), override=False)
 
-from indoor_nav.cli_common import add_common_args, build_config
+from indoor_nav.cli_common import add_common_args, build_config, capture_cli_flags
 from indoor_nav.agent import IndoorNavigationAgent
 
 
@@ -82,7 +93,9 @@ def parse_args() -> argparse.Namespace:
         epilog=__doc__,
     )
     add_common_args(p)
-    return p.parse_args()
+    args = p.parse_args()
+    args._cli_flags = capture_cli_flags()
+    return args
 
 
 async def main():
@@ -117,12 +130,21 @@ async def main():
     logger.info("Goals:      %s", goal_images)
     logger.info("Match:      %s (threshold=%.2f)", args.match_method, args.match_threshold)
     logger.info("SDK URL:    %s", args.url)
+    logger.info(
+        "SLAM:       %s",
+        f"{args.slam_backend} ({args.slam_mode}, {args.slam_endpoint})" if cfg.slam.enabled else "OFF",
+    )
     logger.info("Max speed:  %.2f", args.max_speed)
     logger.info("Loop rate:  %.0f Hz", args.loop_hz)
     logger.info("Obstacles:  %s (%s)", "ON" if cfg.obstacle.enabled else "OFF", args.obstacle_method)
-    logger.info("Topo map:   %s (max %d nodes)", "ON" if cfg.topo_memory.enabled else "OFF", args.topo_max_nodes)
+    if cfg.slam.enabled and cfg.topo_memory.enabled:
+        logger.info("Topo map:   OFF (suppressed by SLAM; configured max %d nodes)", args.topo_max_nodes)
+    else:
+        logger.info("Topo map:   %s (max %d nodes)", "ON" if cfg.topo_memory.enabled else "OFF", args.topo_max_nodes)
     logger.info("Recovery:   %s", "ON" if cfg.recovery.enabled else "OFF")
     logger.info("Logging:    %s", "ON" if cfg.log.enabled else "OFF")
+    if getattr(args, "_applied_presets", None):
+        logger.info("Presets:    %s", ", ".join(args._applied_presets))
     logger.info("=" * 60)
 
     await agent.run(goal_images)

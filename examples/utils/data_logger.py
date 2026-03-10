@@ -15,13 +15,17 @@ import base64
 DEFAULT_BASE_URL = os.getenv("SDK_URL", "http://127.0.0.1:8000")
 DATA_URL = f"{DEFAULT_BASE_URL}/data"
 SDK_URL = f"{DEFAULT_BASE_URL}/sdk"
+SDK_STATUS_URL = f"{DEFAULT_BASE_URL}/sdk-status"
 
 
 def initialize_sdk_session() -> None:
     try:
-        requests.get(SDK_URL, timeout=5)
+        requests.get(SDK_STATUS_URL, timeout=60)
     except Exception:
-        pass
+        try:
+            requests.get(SDK_URL, timeout=5)
+        except Exception:
+            pass
 
 
 class H5DataLogger:
@@ -368,5 +372,4 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-
 

@@ -173,6 +173,7 @@ INIT → NAVIGATING → APPROACHING_GOAL → CHECKPOINT_REACHED → (next goal)
 | siglip2 | SigLIP 2 Base | 768 | ~20ms | ★★★★☆ | Semantic matching |
 | dinov2 | DINOv2 Base CLS | 768 | ~15ms | ★★★☆☆ | Fast baseline |
 | eigenplaces | ResNet50+EigenPlaces | 2048 | ~25ms | ★★★★☆ | Viewpoint-robust VPR |
+| cosplace | ResNet50+CosPlace | 2048 | ~20ms | ★★★★☆ | Compact trained VPR baseline |
 | clip | CLIP ViT-B/32 | 512 | ~15ms | ★★☆☆☆ | Semantic baseline |
 | sift | SIFT + RANSAC | — | ~80ms | ★★★☆☆ | Geometric verification |
 
@@ -360,6 +361,7 @@ After exhausting all levels, the cycle restarts.
 | **DINOv2-VLAD (ours)** | Universal (no VPR training needed), uses rich patch tokens, SOTA on indoor/outdoor/aerial | Higher-dim descriptor (24K) | ~90–95% (AnyLoc benchmarks) |
 | NetVLAD | Classic VPR-trained | Requires training data, less universal | ~70–80% |
 | EigenPlaces | Viewpoint-robust training | Trained on outdoor data | ~80–85% |
+| CosPlace | Compact supervised descriptor, efficient retrieval | Requires trained VPR weights | ~80–85% |
 | CLIP cosine | Semantic understanding | No spatial awareness | ~60–70% |
 | SuperGlue | Geometric verification | Slow (~200ms), fails on textureless walls | ~75% (as standalone) |
 
@@ -510,7 +512,7 @@ vllm serve Qwen/Qwen2.5-VL-7B-Instruct --max-model-len 4096
 python indoor_nav/run_indoor.py \
     --goals indoor_nav/goals/ \
     --policy vlm_hybrid \
-    --vlm-endpoint http://localhost:8000/v1 \
+    --vlm-endpoint http://127.0.0.1:8001/v1 \
     --match-method dinov2_vlad
 ```
 
@@ -518,10 +520,11 @@ python indoor_nav/run_indoor.py \
 
 | Scenario | Command |
 |----------|---------|
-| **Full SOTA** (Qwen2.5-VL + DINOv2-VLAD) | `python indoor_nav/run_indoor.py --goals goals/ --policy vlm_hybrid --vlm-endpoint http://localhost:8000/v1` |
+| **Full SOTA** (Qwen2.5-VL + DINOv2-VLAD) | `python indoor_nav/run_indoor.py --goals goals/ --policy vlm_hybrid --vlm-endpoint http://127.0.0.1:8001/v1` |
 | **No GPU** (heuristic only) | `python indoor_nav/run_indoor.py --goals goals/ --policy heuristic --obstacle-method simple_edge --device cpu` |
 | **DINOv3 toggle** | `python indoor_nav/run_indoor.py --goals goals/ --policy vlm_hybrid --match-method dinov3_vlad` |
-| **A/B matcher eval** | `python indoor_nav/eval_match_ab.py --goals-dir goals/ --queries-dir eval_queries/ --methods dinov2_vlad,dinov3_vlad` |
+| **CosPlace toggle** | `python indoor_nav/run_indoor.py --goals goals/ --policy vlm_hybrid --match-method cosplace` |
+| **A/B matcher eval** | `python indoor_nav/eval_match_ab.py --goals-dir goals/ --queries-dir eval_queries/ --methods dinov2_vlad,dinov3_vlad,cosplace` |
 | **GPT-4o** (cloud VLM) | `python indoor_nav/run_indoor.py --goals goals/ --policy vlm_hybrid --vlm-endpoint https://api.openai.com/v1 --vlm-model gpt-4o --vlm-api-key sk-...` |
 | **NoMaD** (diffusion policy) | `python indoor_nav/run_indoor.py --goals goals/ --policy nomad --match-method dinov2` |
 | **VLA** (OpenVLA) | `python indoor_nav/run_indoor.py --goals goals/ --policy vla` |

@@ -56,6 +56,13 @@ class NoMaDPolicy(BasePolicy):
 
     def setup(self):
         """Load a TorchScript or official NoMaD checkpoint."""
+        if getattr(self.cfg, "backend", "").lower() == "heuristic":
+            logger.info("Using built-in heuristic navigation policy.")
+            self._model = None
+            self._model_format = None
+            self._device = None
+            return
+
         try:
             import torch
 

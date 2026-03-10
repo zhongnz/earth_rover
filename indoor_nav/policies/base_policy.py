@@ -26,6 +26,9 @@ class PolicyInput:
     speed: float = 0.0                               # current speed from telemetry
     obstacle_speed_factor: float = 1.0               # from obstacle detector
     obstacle_steer_bias: float = 0.0                 # from obstacle detector
+    slam_tracking_state: str = "NOT_INITIALIZED"     # SLAM sidecar tracking state
+    slam_pose: Optional["SlamPose"] = None           # latest SLAM pose if available
+    slam_keyframe_id: Optional[int] = None           # latest SLAM keyframe id
 
 
 @dataclass
