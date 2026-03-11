@@ -54,7 +54,7 @@ def add_common_args(
     # Policy
     parser.add_argument(
         "--policy",
-        choices=["nomad", "vint", "gnm", "vlm_hybrid", "vla", "heuristic"],
+        choices=["nomad", "vint", "gnm", "vlm_hybrid", "vla", "heuristic", "maze_search"],
         default="vlm_hybrid",
         help="Navigation policy backend (default: vlm_hybrid)",
     )
@@ -85,6 +85,72 @@ def add_common_args(
     )
     parser.add_argument("--vlm-model", default=default_vlm_model, help="VLM model name")
     parser.add_argument("--vlm-api-key", default=default_vlm_api_key, help="API key for VLM endpoint")
+    parser.add_argument(
+        "--maze-burst-seconds",
+        type=float,
+        default=0.45,
+        help="Forward burst duration for maze_search policy.",
+    )
+    parser.add_argument(
+        "--maze-pause-seconds",
+        type=float,
+        default=0.25,
+        help="Pause duration between bursts for maze_search policy.",
+    )
+    parser.add_argument(
+        "--maze-scan-leg-seconds",
+        type=float,
+        default=1.0,
+        help="One-way scan sweep duration for maze_search policy.",
+    )
+    parser.add_argument(
+        "--maze-backtrack-turn-seconds",
+        type=float,
+        default=1.7,
+        help="Turn-around duration used when maze_search backtracks.",
+    )
+    parser.add_argument(
+        "--maze-open-clearance",
+        type=float,
+        default=0.58,
+        help="Clearance threshold for treating a side or forward lane as open in maze_search.",
+    )
+    parser.add_argument(
+        "--maze-dead-end-clearance",
+        type=float,
+        default=0.24,
+        help="Center-clearance threshold for treating the current view as a dead end in maze_search.",
+    )
+    parser.add_argument(
+        "--maze-goal-rescan-interval",
+        type=float,
+        default=2.0,
+        help="Minimum seconds between repeat scans at the same node-like location in maze_search.",
+    )
+    parser.add_argument(
+        "--maze-turn-bin-threshold",
+        type=float,
+        default=0.28,
+        help="Offset threshold that separates left/straight/right scan bins in maze_search.",
+    )
+    parser.add_argument(
+        "--maze-centering-gain",
+        type=float,
+        default=0.85,
+        help="Corridor-centering gain from left/right clearances in maze_search.",
+    )
+    parser.add_argument(
+        "--maze-blocked-turn-gain",
+        type=float,
+        default=1.15,
+        help="Extra steering gain when the center lane is partially blocked in maze_search.",
+    )
+    parser.add_argument(
+        "--maze-centering-deadband",
+        type=float,
+        default=0.04,
+        help="Ignore tiny left/right clearance differences below this threshold in maze_search.",
+    )
 
     # Goal matching
     parser.add_argument(
@@ -197,6 +263,20 @@ def apply_policy_presets(args: argparse.Namespace) -> argparse.Namespace:
             args.device = "cpu"
             presets.append("device=cpu")
 
+    if args.policy == "maze_search":
+        if "--match-method" not in cli_flags:
+            args.match_method = "wall_rectify_direct"
+            presets.append("match_method=wall_rectify_direct")
+        if "--obstacle-method" not in cli_flags and "--no-obstacle" not in cli_flags:
+            args.obstacle_method = "simple_edge"
+            presets.append("obstacle_method=simple_edge")
+        if "--max-speed" not in cli_flags:
+            args.max_speed = 0.18
+            presets.append("max_speed=0.18")
+        if "--loop-hz" not in cli_flags:
+            args.loop_hz = 6.0
+            presets.append("loop_hz=6")
+
     args._applied_presets = presets
     return args
 
@@ -231,6 +311,17 @@ def build_config(args: argparse.Namespace) -> IndoorNavConfig:
     cfg.policy.vlm_model = args.vlm_model
     if args.vlm_api_key:
         cfg.policy.vlm_api_key = args.vlm_api_key
+    cfg.policy.maze_burst_seconds = max(0.1, float(args.maze_burst_seconds))
+    cfg.policy.maze_pause_seconds = max(0.0, float(args.maze_pause_seconds))
+    cfg.policy.maze_scan_leg_seconds = max(0.1, float(args.maze_scan_leg_seconds))
+    cfg.policy.maze_backtrack_turn_seconds = max(0.1, float(args.maze_backtrack_turn_seconds))
+    cfg.policy.maze_open_clearance = float(args.maze_open_clearance)
+    cfg.policy.maze_dead_end_clearance = float(args.maze_dead_end_clearance)
+    cfg.policy.maze_goal_rescan_interval = max(0.0, float(args.maze_goal_rescan_interval))
+    cfg.policy.maze_turn_bin_threshold = max(0.01, float(args.maze_turn_bin_threshold))
+    cfg.policy.maze_centering_gain = max(0.0, float(args.maze_centering_gain))
+    cfg.policy.maze_blocked_turn_gain = max(0.0, float(args.maze_blocked_turn_gain))
+    cfg.policy.maze_centering_deadband = max(0.0, float(args.maze_centering_deadband))
 
     # Goal matching
     cfg.goal.match_method = args.match_method

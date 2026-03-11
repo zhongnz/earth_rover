@@ -18,6 +18,9 @@ Usage:
   # Heuristic mode (no GPU needed):
   python indoor_nav/run_indoor.py --goals indoor_nav/goals/ --policy heuristic
 
+  # Latency-safe maze search mode:
+  python indoor_nav/run_indoor.py --goals indoor_nav/goals/ --policy maze_search
+
   # VLA mode (OpenVLA):
   python indoor_nav/run_indoor.py --goals indoor_nav/goals/ --policy vla
 

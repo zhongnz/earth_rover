@@ -86,6 +86,21 @@ python indoor_nav/run_indoor.py --goals indoor_nav/goals/ \
 python indoor_nav/run_indoor.py --goals indoor_nav/goals/ \
     --policy vlm_hybrid --match-method wall_rectify_direct
 
+# Run latency-safe maze search (burst-stop motion + event-driven topo nodes)
+python indoor_nav/run_indoor.py --goals indoor_nav/goals/ \
+    --policy maze_search
+
+# Run maze_search with less frequent scanning / rotation
+python indoor_nav/run_indoor.py --goals indoor_nav/goals/ \
+    --policy maze_search \
+    --maze-burst-seconds 0.8 \
+    --maze-scan-leg-seconds 0.6 \
+    --maze-open-clearance 0.66 \
+    --maze-dead-end-clearance 0.18 \
+    --maze-goal-rescan-interval 3.0 \
+    --maze-centering-gain 0.9 \
+    --maze-blocked-turn-gain 1.2
+
 # Live front-camera matcher probe with no motion commands
 python indoor_nav/test_match_live.py \
     --goals "indoor_nav/goals/Screenshot 2026-03-08 133552.png" \
@@ -117,6 +132,13 @@ python indoor_nav/run_indoor.py --goals indoor_nav/goals/ \
 # Run tests
 python indoor_nav/test_integration.py --skip-sdk
 ```
+
+When topological memory is enabled, each run now also writes a topo debug bundle under
+`indoor_nav/logs/indoor_nav_<timestamp>_topo/` with:
+
+- `topo_map.json` — serialized nodes, edges, exit labels, and frontiers
+- `index.html` — browser-friendly topo debug page
+- `nodes/node_XXXX.jpg` — node thumbnails captured from the run
 
 The visual report bundle in `--viz-dir` includes:
 

@@ -63,7 +63,7 @@ class ControlConfig:
 @dataclass
 class PolicyConfig:
     # Which policy backend to use
-    # Options: "nomad", "vint", "gnm", "vlm_hybrid", "vla", "heuristic"
+    # Options: "nomad", "vint", "gnm", "vlm_hybrid", "vla", "heuristic", "maze_search"
     backend: str = "vlm_hybrid"           # CHANGED: VLM-hybrid is now default
 
     # Model paths / endpoints
@@ -91,6 +91,22 @@ class PolicyConfig:
 
     # VLA settings
     vla_backend: str = "openvla"          # "openvla", "octo", "heuristic_plus"
+
+    # Maze search settings (latency-safe burst/scan controller)
+    maze_burst_seconds: float = 0.45
+    maze_pause_seconds: float = 0.25
+    maze_scan_leg_seconds: float = 1.0
+    maze_backtrack_turn_seconds: float = 1.7
+    maze_scan_turn_rate: float = 0.55
+    maze_forward_rate: float = 0.38
+    maze_approach_rate: float = 0.16
+    maze_open_clearance: float = 0.58
+    maze_dead_end_clearance: float = 0.24
+    maze_goal_rescan_interval: float = 2.0
+    maze_turn_bin_threshold: float = 0.28
+    maze_centering_gain: float = 0.85
+    maze_blocked_turn_gain: float = 1.15
+    maze_centering_deadband: float = 0.04
 
 
 # ---------------------------------------------------------------------------

@@ -26,6 +26,13 @@ class PolicyInput:
     speed: float = 0.0                               # current speed from telemetry
     obstacle_speed_factor: float = 1.0               # from obstacle detector
     obstacle_steer_bias: float = 0.0                 # from obstacle detector
+    left_clearance: float = 1.0                      # obstacle detector left zone [0, 1]
+    center_clearance: float = 1.0                    # obstacle detector center zone [0, 1]
+    right_clearance: float = 1.0                     # obstacle detector right zone [0, 1]
+    near_field_occupancy: float = 0.0                # obstacle detector near-field occupancy [0, 1]
+    topo_node_id: Optional[int] = None               # current topo node if one is active
+    topo_target_node_id: Optional[int] = None        # next topo node the planner wants to reach
+    topo_target_exit_label: Optional[str] = None     # local exit label toward the next topo node
     slam_tracking_state: str = "NOT_INITIALIZED"     # SLAM sidecar tracking state
     slam_pose: Optional["SlamPose"] = None           # latest SLAM pose if available
     slam_keyframe_id: Optional[int] = None           # latest SLAM keyframe id
@@ -38,6 +45,8 @@ class PolicyOutput:
     angular: float = 0.0                             # left/right [-1, 1]
     confidence: float = 0.0                          # policy confidence [0, 1]
     waypoints: Optional[np.ndarray] = None           # predicted waypoints if available
+    force_topo_node: bool = False                    # request event-driven topo node creation
+    topo_exit_label: Optional[str] = None            # exit label associated with the chosen local branch
 
 
 class BasePolicy(abc.ABC):

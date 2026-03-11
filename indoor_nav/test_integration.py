@@ -32,6 +32,7 @@ async def test_imports():
     from indoor_nav.modules.recovery import RecoveryManager
     from indoor_nav.modules.topological_memory import TopologicalMemory, TopoMapConfig, TopoNode
     from indoor_nav.policies.base_policy import BasePolicy, PolicyInput, PolicyOutput
+    from indoor_nav.policies.maze_search_policy import MazeSearchPolicy
     from indoor_nav.policies.nomad_policy import NoMaDPolicy
     from indoor_nav.policies.vlm_hybrid_policy import VLMHybridPolicy
     from indoor_nav.policies.vla_policy import VLAPolicy
@@ -107,6 +108,80 @@ async def test_topological_memory():
     logger.info("Topological memory test passed.")
 
 
+async def test_topological_relocalization():
+    import numpy as np
+    from indoor_nav.modules.topological_memory import TopologicalMemory, TopoMapConfig
+
+    logger.info("Testing topological relocalization...")
+    cfg = TopoMapConfig(min_node_distance=0.0, loop_closure_threshold=0.95)
+    topo = TopologicalMemory(cfg)
+
+    img_a = np.zeros((80, 80, 3), dtype=np.uint8)
+    img_b = np.full((80, 80, 3), 255, dtype=np.uint8)
+
+    node_a = topo.update(img_a, orientation=0.0, force_new_node=True)
+    node_b = topo.update(img_b, orientation=90.0, force_new_node=True)
+    node_a_revisit = topo.update(img_a, orientation=180.0, force_new_node=True)
+
+    assert node_a is not None
+    assert node_b is not None and node_b != node_a
+    assert node_a_revisit == node_a, "Expected revisit to relocalize to existing node"
+    assert topo.num_nodes == 2, f"Expected 2 nodes after relocalization, got {topo.num_nodes}"
+    logger.info("  Relocalized revisit to node %d with %d total nodes", node_a_revisit, topo.num_nodes)
+    logger.info("Topological relocalization test passed.")
+
+
+async def test_topological_frontier_guidance():
+    import numpy as np
+    from indoor_nav.modules.topological_memory import TopologicalMemory, TopoMapConfig
+
+    logger.info("Testing topological frontier guidance...")
+    cfg = TopoMapConfig(min_node_distance=0.0, loop_closure_threshold=0.99)
+    topo = TopologicalMemory(cfg)
+
+    img_a = np.zeros((80, 80, 3), dtype=np.uint8)
+    img_b = np.full((80, 80, 3), 64, dtype=np.uint8)
+    img_c = np.full((80, 80, 3), 192, dtype=np.uint8)
+
+    node_a = topo.update(img_a, orientation=0.0, force_new_node=True)
+    node_b = topo.update(img_b, orientation=45.0, force_new_node=True, exit_label="left")
+    node_c = topo.update(img_c, orientation=90.0, force_new_node=True, exit_label="right")
+
+    assert node_a is not None and node_b is not None and node_c is not None
+    assert topo.get_exit_label(node_a, node_b) == "left"
+    assert topo.get_exit_label(node_b, node_c) == "right"
+    assert topo.get_exit_label(node_b, node_a) == "back"
+
+    path = topo.plan_to_nearest_frontier(node_b)
+    assert path is not None and len(path) == 2, f"Expected 2-hop frontier path, got {path}"
+    exit_label = topo.get_exit_label(path[0], path[1])
+    assert exit_label in {"back", "right"}, f"Unexpected frontier exit label: {exit_label}"
+    logger.info("  Frontier path from node %d: %s via %s", node_b, path, exit_label)
+    logger.info("Topological frontier guidance test passed.")
+
+
+async def test_topological_debug_export():
+    import tempfile
+    import numpy as np
+    from indoor_nav.modules.topological_memory import TopologicalMemory, TopoMapConfig
+
+    logger.info("Testing topological debug export...")
+    topo = TopologicalMemory(TopoMapConfig(min_node_distance=0.0))
+    img_a = np.zeros((80, 120, 3), dtype=np.uint8)
+    img_b = np.full((80, 120, 3), 180, dtype=np.uint8)
+    topo.update(img_a, orientation=0.0, force_new_node=True)
+    topo.update(img_b, orientation=90.0, force_new_node=True, exit_label="left")
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        bundle = topo.export_debug_bundle(tmpdir)
+        assert os.path.exists(bundle["json"]), "Expected topo_map.json export"
+        assert os.path.exists(bundle["html"]), "Expected topo HTML export"
+        assert os.path.exists(os.path.join(bundle["nodes_dir"], "node_0000.jpg")), "Expected node thumbnail export"
+        logger.info("  Exported topo bundle to %s", tmpdir)
+
+    logger.info("Topological debug export test passed.")
+
+
 async def test_heuristic_policy():
     import numpy as np
     from indoor_nav.configs.config import PolicyConfig
@@ -131,6 +206,88 @@ async def test_heuristic_policy():
     logger.info("  Heuristic output: linear=%.2f angular=%.2f conf=%.2f",
                 action.linear, action.angular, action.confidence)
     logger.info("Heuristic policy test passed.")
+
+
+async def test_maze_search_policy():
+    import numpy as np
+    from indoor_nav.configs.config import PolicyConfig
+    from indoor_nav.policies.base_policy import PolicyInput
+    from indoor_nav.policies.maze_search_policy import MazePhase, MazeSearchPolicy, NodeMemory
+
+    logger.info("Testing maze search policy...")
+    cfg = PolicyConfig(backend="maze_search")
+    policy = MazeSearchPolicy(cfg)
+    policy.setup()
+
+    dummy_img = np.zeros((480, 640, 3), dtype=np.uint8)
+    obs = PolicyInput(
+        front_image=dummy_img,
+        goal_image=dummy_img,
+        goal_similarity=0.25,
+        goal_trend=0.0,
+        context_images=[dummy_img],
+        left_clearance=0.7,
+        center_clearance=0.75,
+        right_clearance=0.3,
+        topo_node_id=1,
+    )
+    action = policy.predict(obs)
+    logger.info(
+        "  Maze search output: linear=%.2f angular=%.2f force_topo=%s",
+        action.linear,
+        action.angular,
+        action.force_topo_node,
+    )
+
+    policy._phase = MazePhase.PAUSE
+    policy._phase_started = time.time() - cfg.maze_pause_seconds - 0.05
+    policy._node_memory[1] = NodeMemory(exhausted=True)
+    guided_obs = PolicyInput(
+        front_image=dummy_img,
+        goal_image=dummy_img,
+        goal_similarity=0.2,
+        goal_trend=0.0,
+        context_images=[dummy_img],
+        left_clearance=0.8,
+        center_clearance=0.8,
+        right_clearance=0.2,
+        topo_node_id=1,
+        topo_target_node_id=2,
+        topo_target_exit_label="left",
+    )
+    guided_action = policy.predict(guided_obs)
+    assert guided_action.angular > 0.0, "Expected guided scan toward left exit"
+    logger.info(
+        "  Guided maze output: linear=%.2f angular=%.2f topo_exit=%s",
+        guided_action.linear,
+        guided_action.angular,
+        guided_action.topo_exit_label,
+    )
+
+    policy.reset()
+    policy._phase = MazePhase.PAUSE
+    policy._phase_started = time.time() - cfg.maze_pause_seconds - 0.05
+    corridor_obs = PolicyInput(
+        front_image=dummy_img,
+        goal_image=dummy_img,
+        goal_similarity=0.1,
+        goal_trend=0.0,
+        context_images=[dummy_img],
+        left_clearance=0.54,
+        center_clearance=0.75,
+        right_clearance=0.28,
+        topo_node_id=1,
+        near_field_occupancy=0.06,
+    )
+    corridor_action = policy.predict(corridor_obs)
+    assert corridor_action.linear > 0.0, "Expected corridor motion instead of an opportunistic scan"
+    assert corridor_action.angular > 0.0, "Expected corridor-centering turn toward the clearer left side"
+    logger.info(
+        "  Corridor maze output: linear=%.2f angular=%.2f",
+        corridor_action.linear,
+        corridor_action.angular,
+    )
+    logger.info("Maze search policy test passed.")
 
 
 async def test_vla_heuristic():
@@ -215,7 +372,11 @@ async def main():
     await test_imports()
     await test_config_defaults()
     await test_topological_memory()
+    await test_topological_relocalization()
+    await test_topological_frontier_guidance()
+    await test_topological_debug_export()
     await test_heuristic_policy()
+    await test_maze_search_policy()
     await test_vla_heuristic()
     await test_vlm_policy_init()
 

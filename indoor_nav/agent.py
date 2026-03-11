@@ -88,6 +88,9 @@ class IndoorNavigationAgent:
         self._last_slam_gate_log_time: float = 0.0
         self._last_slam_relocalize_time: float = 0.0
         self._topo_suppressed_by_slam: bool = bool(cfg.slam.enabled and cfg.topo_memory.enabled)
+        self._event_driven_topo: bool = bool(
+            cfg.policy.backend == "maze_search" and cfg.topo_memory.enabled and not cfg.slam.enabled
+        )
 
         if cfg.slam.enabled:
             if cfg.slam.backend != "orbslam3":
@@ -122,6 +125,8 @@ class IndoorNavigationAgent:
 
         # Logging
         self._data_logger = None
+        self._run_id: str = ""
+        self._topo_export_dir: Optional[str] = None
 
         # Shutdown
         self._stop_event = asyncio.Event()
@@ -157,6 +162,10 @@ class IndoorNavigationAgent:
             # Force heuristic mode by not providing model path
             policy._model = None
             return policy
+
+        elif backend == "maze_search":
+            from indoor_nav.policies.maze_search_policy import MazeSearchPolicy
+            return MazeSearchPolicy(self.cfg.policy)
 
         else:
             raise ValueError(f"Unknown policy backend: {backend}")
@@ -210,7 +219,13 @@ class IndoorNavigationAgent:
 
         # 3b. Initialize topological memory
         if self.topo_memory:
-            logger.info("Topological memory: ON (max %d nodes)", self.cfg.topo_memory.max_nodes)
+            if self._event_driven_topo:
+                logger.info(
+                    "Topological memory: ON (event-driven maze mode, max %d nodes)",
+                    self.cfg.topo_memory.max_nodes,
+                )
+            else:
+                logger.info("Topological memory: ON (max %d nodes)", self.cfg.topo_memory.max_nodes)
         elif self._topo_suppressed_by_slam:
             logger.info("Topological memory: OFF (suppressed because SLAM is enabled)")
 
@@ -240,9 +255,14 @@ class IndoorNavigationAgent:
             sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "examples"))
             from examples.utils.data_logger import H5DataLogger
 
+            if not self._run_id:
+                self._run_id = time.strftime("%Y%m%d_%H%M%S")
             os.makedirs(self.cfg.log.log_dir, exist_ok=True)
-            ts = time.strftime("%Y%m%d_%H%M%S")
-            path = os.path.join(self.cfg.log.log_dir, f"indoor_nav_{ts}.h5")
+            path = os.path.join(self.cfg.log.log_dir, f"indoor_nav_{self._run_id}.h5")
+            self._topo_export_dir = os.path.join(
+                self.cfg.log.log_dir,
+                f"indoor_nav_{self._run_id}_topo",
+            )
             self._data_logger = H5DataLogger(
                 path,
                 compression="gzip",
@@ -253,6 +273,41 @@ class IndoorNavigationAgent:
         except Exception as e:
             logger.warning("Could not initialize data logger: %s", e)
             self._data_logger = None
+
+    def _export_topo_debug_bundle(self):
+        """Persist a topo snapshot with JSON + HTML debug artifacts."""
+        if not self.topo_memory or self.topo_memory.num_nodes == 0:
+            return
+
+        if not self._run_id:
+            self._run_id = time.strftime("%Y%m%d_%H%M%S")
+        if not self._topo_export_dir:
+            self._topo_export_dir = os.path.join(
+                self.cfg.log.log_dir,
+                f"indoor_nav_{self._run_id}_topo",
+            )
+
+        try:
+            bundle = self.topo_memory.export_debug_bundle(self._topo_export_dir)
+            logger.info("Topo debug bundle: %s", bundle["html"])
+        except Exception as exc:
+            logger.warning("Failed to export topo debug bundle: %s", exc)
+
+    def _compute_topo_guidance(self) -> tuple[Optional[int], Optional[str]]:
+        """Return the next-hop topo guidance toward the nearest known frontier."""
+        if not self.topo_memory:
+            return None, None
+
+        current_node_id = self.topo_memory.current_node_id
+        if current_node_id is None:
+            return None, None
+
+        path = self.topo_memory.plan_to_nearest_frontier(current_node_id)
+        if not path or len(path) < 2:
+            return None, None
+
+        next_hop_id = path[1]
+        return next_hop_id, self.topo_memory.get_exit_label(current_node_id, next_hop_id)
 
     async def run(self, goal_images: List[str]):
         """
@@ -327,7 +382,7 @@ class IndoorNavigationAgent:
                 return
 
         # ---- 1c. Topological memory update ----
-        if self.topo_memory:
+        if self.topo_memory and not self._event_driven_topo:
             self.topo_memory.update(
                 front_image,
                 orientation=bot_state.orientation,
@@ -369,6 +424,11 @@ class IndoorNavigationAgent:
 
         # ---- 4. Navigation policy ----
         goal = self.checkpoint_mgr.current_goal
+        topo_target_node_id = None
+        topo_target_exit_label = None
+        if self.topo_memory:
+            topo_target_node_id, topo_target_exit_label = self._compute_topo_guidance()
+
         policy_input = PolicyInput(
             front_image=front_image,
             goal_image=goal.image if goal else front_image,
@@ -379,12 +439,28 @@ class IndoorNavigationAgent:
             speed=bot_state.speed,
             obstacle_speed_factor=obstacle_info.speed_factor,
             obstacle_steer_bias=obstacle_info.steer_bias,
+            left_clearance=obstacle_info.left_clearance,
+            center_clearance=obstacle_info.center_clearance,
+            right_clearance=obstacle_info.right_clearance,
+            near_field_occupancy=obstacle_info.near_field_occupancy,
+            topo_node_id=self.topo_memory.current_node_id if self.topo_memory else None,
+            topo_target_node_id=topo_target_node_id,
+            topo_target_exit_label=topo_target_exit_label,
             slam_tracking_state=slam_status.tracking_state,
             slam_pose=slam_status.pose,
             slam_keyframe_id=slam_status.keyframe_id,
         )
 
         action = self.policy.predict(policy_input)
+
+        if self.topo_memory and self._event_driven_topo:
+            if self.topo_memory.current_node_id is None or action.force_topo_node:
+                self.topo_memory.update(
+                    front_image,
+                    orientation=bot_state.orientation,
+                    force_new_node=True,
+                    exit_label=action.topo_exit_label,
+                )
 
         # ---- 5. VLM async query (if applicable) ----
         from indoor_nav.policies.vlm_hybrid_policy import VLMHybridPolicy
@@ -631,6 +707,8 @@ class IndoorNavigationAgent:
             await self.sdk.stop(duration=self.cfg.control.stop_duration)
         except Exception:
             pass
+
+        self._export_topo_debug_bundle()
 
         if self._data_logger:
             try:

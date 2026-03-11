@@ -299,6 +299,9 @@ async def _check_policy(cfg, probe_load: bool) -> List[Check]:
     if backend == "heuristic":
         return [Check("Policy backend", "OK", "heuristic mode selected")]
 
+    if backend == "maze_search":
+        return [Check("Policy backend", "OK", "maze_search mode selected")]
+
     if backend in {"nomad", "vint", "gnm"}:
         missing = [name for name in ["torch"] if not _module_available(name)]
         if missing:
