@@ -290,6 +290,49 @@ async def test_maze_search_policy():
     logger.info("Maze search policy test passed.")
 
 
+async def test_mono_inertial_timestamp_alignment():
+    from indoor_nav.slam.imu import (
+        build_mono_inertial_payload,
+        estimate_mono_inertial_clock_alignment,
+    )
+
+    logger.info("Testing mono-inertial timestamp alignment...")
+    accels = [
+        [0.0, 0.0, 1.0, 100.00],
+        [0.0, 0.0, 1.0, 100.05],
+        [0.0, 0.0, 1.0, 100.10],
+    ]
+    gyros = [
+        [0.0, 0.0, 0.1, 100.02],
+        [0.0, 0.0, 0.1, 100.07],
+        [0.0, 0.0, 0.1, 100.12],
+    ]
+    frame_ts = 14500.20
+    data_ts = 999.00
+
+    alignment = estimate_mono_inertial_clock_alignment(
+        accels,
+        gyros,
+        frame_ts=frame_ts,
+        data_ts=data_ts,
+    )
+    assert alignment.needs_correction, "Expected large frame/data skew to trigger correction"
+    assert abs(alignment.offset_s - (frame_ts - gyros[-1][3])) < 1e-6
+
+    payload, newest_imu_ts = build_mono_inertial_payload(
+        accels,
+        gyros,
+        frame_ts=frame_ts,
+        last_imu_ts=0.0,
+        timestamp_offset_s=alignment.offset_s,
+    )
+    samples = payload["samples"]
+    assert len(samples) == 3, f"Expected all gyro samples, got {len(samples)}"
+    assert abs(samples[-1]["t"] - frame_ts) < 1e-6, "Expected corrected IMU sample to align with frame clock"
+    assert abs(newest_imu_ts - gyros[-1][3]) < 1e-6, "Expected raw IMU timestamp bookkeeping to stay unchanged"
+    logger.info("Mono-inertial timestamp alignment test passed.")
+
+
 async def test_vla_heuristic():
     import numpy as np
     from indoor_nav.configs.config import PolicyConfig
@@ -377,6 +420,7 @@ async def main():
     await test_topological_debug_export()
     await test_heuristic_policy()
     await test_maze_search_policy()
+    await test_mono_inertial_timestamp_alignment()
     await test_vla_heuristic()
     await test_vlm_policy_init()
 

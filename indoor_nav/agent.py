@@ -43,6 +43,7 @@ from indoor_nav.modules.obstacle_avoidance import ObstacleDetector, ObstacleInfo
 from indoor_nav.modules.recovery import RecoveryManager
 from indoor_nav.modules.topological_memory import TopologicalMemory, TopoMapConfig
 from indoor_nav.policies.base_policy import BasePolicy, PolicyInput, PolicyOutput
+from indoor_nav.slam.imu import build_mono_inertial_payload, estimate_mono_inertial_clock_alignment
 from indoor_nav.slam.orbslam3_client import ORBSLAM3Client
 from indoor_nav.slam.types import SlamStatus
 
@@ -87,6 +88,8 @@ class IndoorNavigationAgent:
         self._last_slam_failure_log_time: float = 0.0
         self._last_slam_gate_log_time: float = 0.0
         self._last_slam_relocalize_time: float = 0.0
+        self._last_slam_imu_ts: float = 0.0
+        self._last_slam_imu_clock_log_time: float = 0.0
         self._topo_suppressed_by_slam: bool = bool(cfg.slam.enabled and cfg.topo_memory.enabled)
         self._event_driven_topo: bool = bool(
             cfg.policy.backend == "maze_search" and cfg.topo_memory.enabled and not cfg.slam.enabled
@@ -572,14 +575,34 @@ class IndoorNavigationAgent:
         except Exception as e:
             logger.debug("Checkpoint report failed (may be expected): %s", e)
 
-    def _build_slam_imu(self, bot_state) -> Optional[dict]:
+    def _build_slam_imu(self, bot_state, frame_ts: float) -> Optional[dict]:
         if self.cfg.slam.mode != "mono_inertial":
             return None
-        return {
-            "timestamp": float(bot_state.timestamp),
-            "accels": bot_state.accels,
-            "gyros": bot_state.gyros,
-        }
+        alignment = estimate_mono_inertial_clock_alignment(
+            bot_state.accels,
+            bot_state.gyros,
+            frame_ts=float(frame_ts),
+            data_ts=bot_state.timestamp,
+        )
+        now = time.time()
+        if alignment.needs_correction and (now - self._last_slam_imu_clock_log_time) >= 5.0:
+            logger.warning(
+                "SLAM IMU clock skew detected. Shifting IMU timestamps by %.3fs "
+                "(frame-sensor=%.3fs, frame-data=%.3fs).",
+                alignment.offset_s,
+                alignment.frame_sensor_delta_s if alignment.frame_sensor_delta_s is not None else float("nan"),
+                alignment.frame_data_delta_s if alignment.frame_data_delta_s is not None else float("nan"),
+            )
+            self._last_slam_imu_clock_log_time = now
+        payload, newest_imu_ts = build_mono_inertial_payload(
+            bot_state.accels,
+            bot_state.gyros,
+            frame_ts=float(frame_ts),
+            last_imu_ts=self._last_slam_imu_ts,
+            timestamp_offset_s=alignment.offset_s,
+        )
+        self._last_slam_imu_ts = newest_imu_ts
+        return payload
 
     async def _update_slam(self, front_image: np.ndarray, frame_ts: float, bot_state) -> SlamStatus:
         if not self.slam:
@@ -594,7 +617,7 @@ class IndoorNavigationAgent:
             slam_status = await self.slam.track(
                 front_image,
                 frame_ts,
-                imu=self._build_slam_imu(bot_state),
+                imu=self._build_slam_imu(bot_state, frame_ts),
             )
             self._slam_status = slam_status
             self._last_slam_push_time = now
